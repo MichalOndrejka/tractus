@@ -1,0 +1,25 @@
+{
+  "name": "tractus",
+  "version": "0.0.0",
+  "private": true,
+  "description": "An autonomous software company of AI agents that build your backlog under your approval.",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "npm-run-all --parallel dev:backend dev:web",
+    "dev:backend": "npm run dev -w @tractus/backend",
+    "dev:web": "npm run dev -w @tractus/web",
+    "build": "npm run build -w @tractus/shared && npm run build -w @tractus/backend && npm run build -w @tractus/web",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present"
+  },
+  "devDependencies": {
+    "npm-run-all": "^4.1.5",
+    "typescript": "^5.6.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

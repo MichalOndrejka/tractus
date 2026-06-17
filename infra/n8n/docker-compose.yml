@@ -1,0 +1,31 @@
+# n8n — the orchestration "brain" for Tractus.
+#
+# n8n owns the *trigger* only: on a schedule it calls the backend's
+# /api/dispatch/tick endpoint. The backend still owns the queue (the Ready
+# column) and admission control (concurrency + budget). Later, the same n8n
+# instance will host the approval-gate + notification workflows.
+#
+#   cd infra/n8n && docker compose up -d
+#   open http://localhost:5678
+services:
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: tractus-n8n
+    restart: unless-stopped
+    ports:
+      - '5678:5678'
+    environment:
+      # Accessed over http on localhost/LAN, so don't force a secure cookie.
+      - N8N_SECURE_COOKIE=false
+      - N8N_RUNNERS_ENABLED=true
+      - GENERIC_TIMEZONE=Europe/Bratislava
+    volumes:
+      - n8n_data:/home/node/.n8n
+    # Lets the container reach the backend running on the host as
+    # http://host.docker.internal:8787 (built-in on Docker Desktop; this line
+    # adds it on plain Linux too).
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+
+volumes:
+  n8n_data:

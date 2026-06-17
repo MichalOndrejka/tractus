@@ -1,0 +1,30 @@
+{
+  "name": "@tractus/backend",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test --experimental-test-coverage --test-coverage-exclude=src/worker.ts --test-coverage-exclude=src/github.ts --test-coverage-exclude=src/ws.ts --test-coverage-exclude=test/** --test-coverage-exclude=**/packages/shared/** --test-coverage-lines=80 --test-coverage-functions=70 --test-coverage-branches=70 test/pipeline.test.ts test/state.test.ts test/db.test.ts test/http.test.ts"
+  },
+  "dependencies": {
+    "@tractus/shared": "*",
+    "@fastify/cookie": "^11.0.2",
+    "@fastify/cors": "^10.0.1",
+    "@fastify/websocket": "^11.0.1",
+    "@octokit/rest": "^21.0.2",
+    "better-sqlite3": "^11.5.0",
+    "dotenv": "^16.4.5",
+    "fastify": "^5.1.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/node": "^22.9.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}
