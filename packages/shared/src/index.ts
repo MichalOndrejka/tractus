@@ -263,7 +263,6 @@ export interface Project {
   id: string;
   name: string;
   repo: string; // "owner/name"
-  description?: string;
   defaultBranch?: string;
   createdAt: string;
   openItems?: number;
@@ -287,7 +286,7 @@ export interface GitHubRepoOption {
 // Normalized backlog item (UI view, sourced from GitHub)
 // ---------------------------------------------------------------------------
 
-export type BacklogItemType = 'feature' | 'bug' | 'chore' | 'design';
+export type BacklogItemType = 'feature' | 'bug';
 
 export interface BacklogItem {
   /** GitHub issue number. */

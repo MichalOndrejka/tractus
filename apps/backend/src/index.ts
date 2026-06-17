@@ -13,6 +13,7 @@ import {
 } from '@tractus/shared';
 import { config } from './config.js';
 import {
+  closeIssue,
   createIssue,
   fetchIssues,
   listRepos,
@@ -34,7 +35,6 @@ import {
   getPositions,
   getProject,
   getProviderConnection,
-  getState,
   latestPrUrlForItem,
   setProviderConnection,
   listActiveRuns,
@@ -158,10 +158,9 @@ app.delete('/api/providers/:id/connection', async (req, reply) => {
 app.get('/api/projects', async () => ({ projects: listProjects() }));
 
 app.post('/api/projects', async (req, reply) => {
-  const { name, repo, description, defaultBranch } = (req.body ?? {}) as {
+  const { name, repo, defaultBranch } = (req.body ?? {}) as {
     name?: string;
     repo?: string;
-    description?: string;
     defaultBranch?: string;
   };
   if (!repo) return reply.code(400).send({ error: 'repo required' });
@@ -169,7 +168,6 @@ app.post('/api/projects', async (req, reply) => {
     project: createProject({
       name: name?.trim() || repo,
       repo,
-      description: description?.trim() || undefined,
       defaultBranch: defaultBranch?.trim() || undefined,
     }),
   };
@@ -266,6 +264,8 @@ app.patch('/api/projects/:id/issues/:number', async (req, reply) => {
     state?: BacklogState;
     priority?: number;
     type?: BacklogItemType;
+    title?: string;
+    body?: string;
   };
   try {
     const item = await updateIssue(token, project.repo, Number(number), patch);
@@ -273,6 +273,21 @@ app.patch('/api/projects/:id/issues/:number', async (req, reply) => {
   } catch (err) {
     app.log.error(err);
     return reply.code(502).send({ error: 'failed to update issue' });
+  }
+});
+
+app.delete('/api/projects/:id/issues/:number', async (req, reply) => {
+  const { id, number } = req.params as { id: string; number: string };
+  const project = getProject(id);
+  if (!project) return reply.code(404).send({ error: 'project not found' });
+  const token = requireToken(reply);
+  if (!token) return;
+  try {
+    await closeIssue(token, project.repo, Number(number));
+    return { ok: true };
+  } catch (err) {
+    app.log.error(err);
+    return reply.code(502).send({ error: 'failed to delete issue' });
   }
 });
 
@@ -380,17 +395,10 @@ app.post('/api/agents/:agentId/run', async (req, reply) => {
 });
 
 // --- dispatch (auto-pickup of Ready items) ----------------------------------
-// The Ready column is the queue; canDispatch() is the admission control. The
-// *trigger* lives in n8n, which calls /api/dispatch/tick on a schedule with the
-// shared DISPATCH_TOKEN. The on/off switch and a manual tick are here too.
-
-app.get('/api/dispatch', async () => ({ enabled: getState('auto_dispatch_enabled') !== 'false' }));
-
-app.post('/api/dispatch', async (req) => {
-  const { enabled } = (req.body ?? {}) as { enabled?: boolean };
-  setState('auto_dispatch_enabled', enabled ? 'true' : 'false');
-  return { enabled: !!enabled };
-});
+// Always-on: free agents pull the top Ready items automatically. The Ready
+// column is the queue; canDispatch() is the admission control. The internal
+// loop below drives it; n8n may also call /api/dispatch/tick on a schedule with
+// the shared DISPATCH_TOKEN. (The budget breaker is the only halt.)
 
 // One dispatch pass. Auth: a browser session OR the x-dispatch-token header.
 app.post('/api/dispatch/tick', async () => dispatchTick());

@@ -85,9 +85,6 @@ function ConnectModal({
           autoFocus
         />
       </div>
-      <div className="muted small" style={{ marginBottom: 12 }}>
-        Stored locally on your machine and never returned by the API.
-      </div>
       {err && <div className="banner err">{err}</div>}
       <button className="btn primary" disabled={!token.trim() || busy} onClick={connect}>
         {busy ? 'saving…' : 'Connect'}
@@ -125,11 +122,6 @@ export function Providers() {
 
   return (
     <Screen title="Providers" back>
-      <p className="muted small" style={{ lineHeight: 1.6 }}>
-        Connect the agentic systems your agents can run on. Each agent picks one provider; connect
-        its credentials once here.
-      </p>
-
       {loading ? (
         <div className="spinner">loading providers…</div>
       ) : (

@@ -86,7 +86,6 @@ db.exec(`
     id             TEXT PRIMARY KEY,
     name           TEXT NOT NULL,
     repo           TEXT NOT NULL,
-    description    TEXT,
     default_branch TEXT,
     created_at     TEXT NOT NULL
   );
@@ -133,7 +132,6 @@ function ensureColumn(table: string, column: string, ddl: string): void {
     db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
   }
 }
-ensureColumn('project', 'description', 'description TEXT');
 ensureColumn('project', 'default_branch', 'default_branch TEXT');
 ensureColumn('agent', 'instructions', "instructions TEXT NOT NULL DEFAULT ''");
 ensureColumn('agent', 'skills', "skills TEXT NOT NULL DEFAULT '[]'");
@@ -512,7 +510,6 @@ interface ProjectRow {
   id: string;
   name: string;
   repo: string;
-  description: string | null;
   default_branch: string | null;
   created_at: string;
 }
@@ -525,7 +522,6 @@ function mapProject(r: ProjectRow): Project {
     id: r.id,
     name: r.name,
     repo: r.repo,
-    description: r.description ?? undefined,
     defaultBranch: r.default_branch ?? undefined,
     createdAt: r.created_at,
     agentCount,
@@ -545,19 +541,17 @@ export function getProject(id: string): Project | undefined {
 export function createProject(input: {
   name: string;
   repo: string;
-  description?: string;
   defaultBranch?: string;
 }): Project {
   const id = randomUUID();
   const createdAt = new Date().toISOString();
   db.prepare(
-    'INSERT INTO project(id, name, repo, description, default_branch, created_at) VALUES(?, ?, ?, ?, ?, ?)',
-  ).run(id, input.name, input.repo, input.description ?? null, input.defaultBranch ?? null, createdAt);
+    'INSERT INTO project(id, name, repo, default_branch, created_at) VALUES(?, ?, ?, ?, ?)',
+  ).run(id, input.name, input.repo, input.defaultBranch ?? null, createdAt);
   return {
     id,
     name: input.name,
     repo: input.repo,
-    description: input.description,
     defaultBranch: input.defaultBranch,
     createdAt,
     agentCount: 0,

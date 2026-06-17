@@ -142,29 +142,12 @@ test('projects + agents CRUD', async () => {
   assert.equal(del.statusCode, 200);
 });
 
-test('dispatch: on by default, toggle off works, and a tick is a no-op without GitHub', async () => {
-  // Auto-dispatch is on by default (only an explicit toggle-off disables it).
-  assert.equal((await app.inject({ method: 'GET', url: '/api/dispatch', headers: authed() })).json().enabled, true);
-
+test('dispatch: always-on, and a tick is a no-op without GitHub', async () => {
+  // Auto-dispatch is always on; a tick just no-ops when GitHub isn't connected.
   const tick = await app.inject({ method: 'POST', url: '/api/dispatch/tick', headers: authed(), payload: {} });
   assert.equal(tick.statusCode, 200);
+  assert.equal(tick.json().enabled, true);
   assert.equal(tick.json().dispatched.length, 0); // no GitHub connected
-
-  const off = await app.inject({
-    method: 'POST',
-    url: '/api/dispatch',
-    headers: authed(),
-    payload: { enabled: false },
-  });
-  assert.equal(off.json().enabled, false);
-  assert.equal((await app.inject({ method: 'GET', url: '/api/dispatch', headers: authed() })).json().enabled, false);
-
-  // Disabled, a tick reports it's off.
-  const offTick = await app.inject({ method: 'POST', url: '/api/dispatch/tick', headers: authed(), payload: {} });
-  assert.equal(offTick.json().enabled, false);
-
-  // Turn it back on for the rest of the suite.
-  await app.inject({ method: 'POST', url: '/api/dispatch', headers: authed(), payload: { enabled: true } });
 });
 
 test('budget + approvals read paths and guards', async () => {

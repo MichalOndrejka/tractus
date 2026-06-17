@@ -68,7 +68,6 @@ export const api = {
   createProject: (input: {
     name: string;
     repo: string;
-    description?: string;
     defaultBranch?: string;
   }) =>
     req<{ project: Project }>('/api/projects', {
@@ -91,12 +90,14 @@ export const api = {
   updateIssue: (
     projectId: string,
     number: number,
-    patch: { state?: BacklogState; priority?: number; type?: BacklogItemType },
+    patch: { state?: BacklogState; priority?: number; type?: BacklogItemType; title?: string; body?: string },
   ) =>
     req<{ item: BacklogItem }>(`/api/projects/${projectId}/issues/${number}`, {
       method: 'PATCH',
       body: JSON.stringify(patch),
     }),
+  deleteIssue: (projectId: string, number: number) =>
+    req<{ ok: true }>(`/api/projects/${projectId}/issues/${number}`, { method: 'DELETE' }),
   setOrder: (projectId: string, numbers: number[]) =>
     req<{ ok: true }>(`/api/projects/${projectId}/order`, {
       method: 'PUT',
@@ -147,19 +148,6 @@ export const api = {
     req<{ run: Run }>(`/api/agents/${agentId}/run`, {
       method: 'POST',
       body: JSON.stringify({ workItemNumber }),
-    }),
-
-  // dispatch (auto-pickup of Ready items)
-  dispatchStatus: () => req<{ enabled: boolean }>('/api/dispatch'),
-  setDispatch: (enabled: boolean) =>
-    req<{ enabled: boolean }>('/api/dispatch', {
-      method: 'POST',
-      body: JSON.stringify({ enabled }),
-    }),
-  dispatchTick: () =>
-    req<{ enabled: boolean; dispatched: unknown[]; reason?: string }>('/api/dispatch/tick', {
-      method: 'POST',
-      body: JSON.stringify({}),
     }),
 
   // shared

@@ -104,12 +104,12 @@ export async function createIssue(
   return normalizeIssue(repo, data);
 }
 
-/** Update an issue's managed labels (state / priority / type) and open/closed. */
+/** Update an issue's managed labels (state / priority / type), title/body, open/closed. */
 export async function updateIssue(
   token: string,
   repo: string,
   number: number,
-  patch: { state?: BacklogState; priority?: number; type?: BacklogItemType },
+  patch: { state?: BacklogState; priority?: number; type?: BacklogItemType; title?: string; body?: string },
 ): Promise<BacklogItem> {
   const octokit = client(token);
   const { owner, repo: name } = parseRepo(repo);
@@ -133,9 +133,19 @@ export async function updateIssue(
     repo: name,
     issue_number: number,
     labels: next,
-    state: patch.state === 'DONE' ? 'closed' : 'open',
+    ...(patch.title !== undefined ? { title: patch.title } : {}),
+    ...(patch.body !== undefined ? { body: patch.body } : {}),
+    // only touch open/closed when the caller actually changes the state
+    ...(patch.state !== undefined ? { state: patch.state === 'DONE' ? ('closed' as const) : ('open' as const) } : {}),
   });
   return normalizeIssue(repo, data);
+}
+
+/** Remove an item from the backlog by closing the GitHub issue (REST has no hard delete). */
+export async function closeIssue(token: string, repo: string, number: number): Promise<void> {
+  const octokit = client(token);
+  const { owner, repo: name } = parseRepo(repo);
+  await octokit.issues.update({ owner, repo: name, issue_number: number, state: 'closed' });
 }
 
 const PRIORITY_NAME: Record<number, string> = { 1: 'low', 2: 'medium', 3: 'high', 4: 'urgent' };

@@ -55,7 +55,7 @@ export function AgentForm({
       </div>
 
       <div className="field">
-        <label>Provider (agentic system)</label>
+        <label>Provider</label>
         <select
           value={value.provider}
           onChange={(e) => changeProvider(e.target.value as AgentProvider)}
@@ -67,9 +67,6 @@ export function AgentForm({
             </option>
           ))}
         </select>
-        <div className="muted small" style={{ marginTop: 6 }}>
-          {currentProvider.blurb}
-        </div>
       </div>
 
       <div className="field">
@@ -85,7 +82,7 @@ export function AgentForm({
 
       <div className="field">
         <label>
-          Daily budget — <span style={{ color: 'var(--accent)' }}>${value.dailyBudgetUsd.toFixed(2)}/day</span>
+          Daily budget — <span style={{ color: 'var(--signal)' }}>${value.dailyBudgetUsd.toFixed(2)}/day</span>
         </label>
         <input
           className="slider"
@@ -105,7 +102,7 @@ export function AgentForm({
       <div className="field">
         <label>Agent file (system prompt)</label>
         <textarea
-          rows={10}
+          rows={6}
           value={value.instructions}
           onChange={(e) => set({ instructions: e.target.value })}
           style={{ fontSize: 12, lineHeight: 1.5 }}
@@ -121,7 +118,7 @@ export function AgentForm({
         </div>
         {value.skills.length === 0 && (
           <div className="muted small" style={{ marginBottom: 8 }}>
-            No skills yet. Skills are extra capability prompts layered on top of the agent file.
+            No skills yet.
           </div>
         )}
         {value.skills.map((s) => (

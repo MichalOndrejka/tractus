@@ -34,9 +34,8 @@ function ConnectModal({
   return (
     <Modal title="Connect GitHub" onClose={onClose}>
       <p className="muted small" style={{ lineHeight: 1.6, marginTop: 0 }}>
-        Paste a Personal Access Token with <code>repo</code> + <code>issues</code> scope. It's
-        stored locally and never leaves your machine. One-click OAuth can be added later once a
-        GitHub OAuth App is registered.
+        Needs read &amp; write on <code>Contents</code>, <code>Issues</code>, and{' '}
+        <code>Pull requests</code>.
       </p>
       <div className="field">
         <label>Personal Access Token</label>
@@ -81,7 +80,6 @@ function AddProjectModal({
 
   // form fields
   const [name, setName] = useState('');
-  const [description, setDescription] = useState('');
   const [branch, setBranch] = useState('');
   const [busy, setBusy] = useState(false);
 
@@ -96,7 +94,6 @@ function AddProjectModal({
   const pick = (repo: GitHubRepoOption) => {
     setSelected(repo);
     setName(repo.fullName.split('/')[1]);
-    setDescription(repo.description ?? '');
     setBranch(repo.defaultBranch);
   };
 
@@ -108,7 +105,6 @@ function AddProjectModal({
       const { project } = await api.createProject({
         name: name.trim() || selected.fullName,
         repo: selected.fullName,
-        description,
         defaultBranch: branch,
       });
       onAdded(project);
@@ -138,15 +134,6 @@ function AddProjectModal({
         <div className="field">
           <label>Default branch (agents branch from here)</label>
           <input value={branch} onChange={(e) => setBranch(e.target.value)} />
-        </div>
-        <div className="field">
-          <label>Description / goal (optional)</label>
-          <textarea
-            rows={3}
-            placeholder="What is this project about? What should the crew focus on?"
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-          />
         </div>
         {err && <div className="banner err">{err}</div>}
         <div className="row between">
@@ -230,13 +217,11 @@ export function Projects() {
       {/* not connected */}
       {conn && !conn.connected && (
         <div className="empty">
-          <div style={{ fontSize: 40, color: 'var(--accent)', marginBottom: 12 }}>▤</div>
-          Connect your GitHub account to start
-          <br />
-          managing projects and their backlogs.
+          <div style={{ fontSize: 40, color: 'var(--signal)', marginBottom: 14 }}>▤</div>
+          Connect GitHub to manage projects.
           <div style={{ marginTop: 22 }}>
             <button className="btn primary" onClick={() => setConnecting(true)}>
-              Connect
+              Connect GitHub
             </button>
           </div>
         </div>
@@ -257,13 +242,11 @@ export function Projects() {
 
           {projects.length === 0 ? (
             <div className="empty">
-              <div style={{ fontSize: 40, color: 'var(--accent)', marginBottom: 12 }}>＋</div>
-              You don't have any projects yet.
-              <br />
-              Add a repository to start working on it.
+              <div style={{ fontSize: 40, color: 'var(--signal)', marginBottom: 14 }}>＋</div>
+              No projects yet. Add a repository to start.
               <div style={{ marginTop: 22 }}>
                 <button className="btn primary" onClick={() => setAdding(true)}>
-                  + Add your first project
+                  + Add project
                 </button>
               </div>
             </div>
@@ -275,11 +258,6 @@ export function Projects() {
                   <div className="grow" onClick={() => navigate(`/projects/${p.id}`)} role="button">
                     <div style={{ fontWeight: 700 }}>{p.name}</div>
                     <div className="muted small">{p.repo}</div>
-                    {p.description && (
-                      <div className="muted small" style={{ marginTop: 4 }}>
-                        {p.description}
-                      </div>
-                    )}
                   </div>
                   <div className="row" style={{ gap: 8 }}>
                     <span className="tag">{p.agentCount ?? 0} agents</span>

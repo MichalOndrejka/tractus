@@ -23,7 +23,6 @@ import {
   getGithubToken,
   getPositions,
   getProviderConnection,
-  getState,
   hasApprovedPlan,
   hasCompletedRunForRole,
   listActiveRuns,
@@ -102,10 +101,8 @@ const DISPATCHABLE_STATES: BacklogState[] = ['READY', 'IN_TESTING', 'IN_REVIEW']
  * Triggered by n8n (or any caller) via POST /api/dispatch/tick.
  */
 export async function dispatchTick(): Promise<DispatchResult> {
-  // On by default: only an explicit toggle-off ('false') disables it.
-  if (getState('auto_dispatch_enabled') === 'false') {
-    return { enabled: false, dispatched: [], reason: 'auto-dispatch is off' };
-  }
+  // Always-on: free agents pull Ready items automatically. (The budget breaker
+  // in canDispatch() / dispatch_paused is the only thing that halts a pass.)
   const token = getGithubToken();
   if (!token) return { enabled: true, dispatched: [], reason: 'GitHub not connected' };
 

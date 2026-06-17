@@ -59,7 +59,7 @@ export function Home() {
           >
             <span className="glyph">{t.glyph}</span>
             <span className="name">{t.name}</span>
-            {t.soon ? <span className="soon">soon</span> : null}
+            <span className="status">{t.soon ? 'soon' : 'open'}</span>
           </div>
         ))}
       </div>

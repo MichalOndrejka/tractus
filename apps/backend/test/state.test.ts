@@ -16,9 +16,10 @@ test('stateFromLabels: reads state: label case-insensitively, defaults to BACKLO
 });
 
 test('typeFromLabels: type: prefix, bare "bug", default feature', () => {
-  assert.equal(typeFromLabels(['type:chore']), 'chore');
-  assert.equal(typeFromLabels(['type:design']), 'design');
+  assert.equal(typeFromLabels(['type:feature']), 'feature');
+  assert.equal(typeFromLabels(['type:bug']), 'bug');
   assert.equal(typeFromLabels(['bug']), 'bug'); // bare GitHub label
+  assert.equal(typeFromLabels(['type:chore']), 'feature'); // removed type -> default
   assert.equal(typeFromLabels(['type:nonsense']), 'feature'); // invalid -> default
   assert.equal(typeFromLabels([]), 'feature');
 });

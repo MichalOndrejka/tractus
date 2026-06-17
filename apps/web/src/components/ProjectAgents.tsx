@@ -123,11 +123,7 @@ export function ProjectAgents({ projectId }: { projectId: string }) {
       </div>
 
       {agents.length === 0 ? (
-        <div className="empty">
-          No agents deployed.
-          <br />
-          Deploy a template (Architect, Developer, Tester…) to staff this project.
-        </div>
+        <div className="empty">No agents deployed. Deploy one to staff this project.</div>
       ) : (
         agents.map((a) => (
           <div
@@ -148,7 +144,7 @@ export function ProjectAgents({ projectId }: { projectId: string }) {
               </span>
               <span
                 className="small"
-                style={{ color: a.status === 'running' ? 'var(--accent)' : 'var(--text-dim)' }}
+                style={{ color: a.status === 'running' ? 'var(--signal)' : 'var(--text-dim)' }}
               >
                 {a.status}
               </span>

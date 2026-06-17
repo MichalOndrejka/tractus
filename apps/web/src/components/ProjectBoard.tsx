@@ -77,7 +77,7 @@ function subTagForState(state: BacklogState): { label: string; variant: string }
   }
 }
 
-const TYPES: BacklogItemType[] = ['feature', 'bug', 'chore', 'design'];
+const TYPES: BacklogItemType[] = ['feature', 'bug'];
 
 type Columns = Record<string, number[]>;
 type ByNumber = Record<number, BacklogItem>;
@@ -115,7 +115,7 @@ function NewItemModal({
 }: {
   projectId: string;
   onClose: () => void;
-  onCreated: () => void;
+  onCreated: (item: BacklogItem) => void;
 }) {
   const [title, setTitle] = useState('');
   const [body, setBody] = useState('');
@@ -127,8 +127,8 @@ function NewItemModal({
     setBusy(true);
     setErr(undefined);
     try {
-      await api.createIssue(projectId, { title, body, type });
-      onCreated();
+      const { item } = await api.createIssue(projectId, { title, body, type });
+      onCreated(item);
     } catch (e) {
       setErr(String(e instanceof Error ? e.message : e));
       setBusy(false);
@@ -156,7 +156,7 @@ function NewItemModal({
         </select>
       </div>
       <div className="muted small" style={{ marginBottom: 12 }}>
-        Lands in <b>New</b>. Drag to rank it — order on the board is its priority.
+        Lands in <b>New</b> — drag to rank it (order = priority).
       </div>
       {err && <div className="banner err">{err}</div>}
       <button className="btn primary" disabled={!title || busy} onClick={submit}>
@@ -171,14 +171,18 @@ function EditItemModal({
   item,
   onClose,
   onSaved,
+  onDeleted,
 }: {
   projectId: string;
   item: BacklogItem;
   onClose: () => void;
   onSaved: () => void;
+  onDeleted: (number: number) => void;
 }) {
   const currentCol = columnForState(item.state);
   const agentControlled = !!currentCol.locked;
+  const [title, setTitle] = useState(item.title);
+  const [body, setBody] = useState(item.body);
   const [columnId, setColumnId] = useState(currentCol.id);
   const [type, setType] = useState<BacklogItemType>(item.type);
   const [comment, setComment] = useState('');
@@ -193,8 +197,21 @@ function EditItemModal({
     const targetCol = agentControlled || col.locked ? currentCol : col;
     const state = targetCol.states.includes(item.state) ? item.state : targetCol.dropState;
     try {
-      await api.updateIssue(projectId, item.number, { state, type });
+      await api.updateIssue(projectId, item.number, { state, type, title: title.trim(), body });
       onSaved();
+    } catch (e) {
+      setErr(String(e instanceof Error ? e.message : e));
+      setBusy(false);
+    }
+  };
+
+  const del = async () => {
+    if (!window.confirm(`Delete #${item.number}? This closes the issue on GitHub.`)) return;
+    setBusy(true);
+    setErr(undefined);
+    try {
+      await api.deleteIssue(projectId, item.number);
+      onDeleted(item.number);
     } catch (e) {
       setErr(String(e instanceof Error ? e.message : e));
       setBusy(false);
@@ -230,7 +247,7 @@ function EditItemModal({
   };
 
   return (
-    <Modal title={`#${item.number} · ${item.title}`} onClose={onClose}>
+    <Modal title={`#${item.number}`} onClose={onClose}>
       {item.activeAgent && (
         <div className="banner" style={{ marginBottom: 12 }}>
           <span className="pulse" /> {item.activeAgent.agentName} ({item.activeAgent.role}) is
@@ -245,8 +262,8 @@ function EditItemModal({
           </div>
           <div className="muted small" style={{ marginBottom: 8 }}>
             {approval.gate === 'plan'
-              ? 'The Architect produced a plan. Approve to hand it to the Developer, or reject to send it back to New.'
-              : 'The Developer opened a PR. Approve to mark Done, or reject to send it back for changes.'}{' '}
+              ? 'Approve to hand the plan to the Developer, or reject to send it back.'
+              : 'Approve to merge and mark Done, or reject to send it back for changes.'}{' '}
             <a href={item.prUrl ?? item.url} target="_blank" rel="noreferrer">
               {item.prUrl ? 'review the PR ↗' : 'review on GitHub ↗'}
             </a>
@@ -268,13 +285,20 @@ function EditItemModal({
           </div>
         </div>
       )}
+      <div className="field">
+        <label>Title</label>
+        <input value={title} onChange={(e) => setTitle(e.target.value)} />
+      </div>
+      <div className="field">
+        <label>Description</label>
+        <textarea rows={5} value={body} onChange={(e) => setBody(e.target.value)} />
+      </div>
       <div className="row" style={{ gap: 12 }}>
         <div className="field grow">
           <label>Column</label>
           {agentControlled ? (
             <div className="muted small" style={{ padding: '8px 0' }}>
-              <b>{currentCol.label}</b> — stage is driven by the agents (Architect → Developer →
-              Tester). It isn't moved by hand.{' '}
+              <b>{currentCol.label}</b> — driven by the agents, not moved by hand.{' '}
               {!item.activeAgent && (
                 <button
                   className="btn sm"
@@ -309,12 +333,17 @@ function EditItemModal({
       </div>
       {err && <div className="banner err">{err}</div>}
       <div className="row between">
-        <a className="btn sm" href={item.url} target="_blank" rel="noreferrer">
-          open on GitHub ↗
-        </a>
-        <button className="btn primary" disabled={busy} onClick={save}>
-          {busy ? 'saving…' : 'Save'}
+        <button className="btn danger sm" disabled={busy} onClick={del}>
+          Delete
         </button>
+        <div className="row" style={{ gap: 8 }}>
+          <a className="btn sm" href={item.url} target="_blank" rel="noreferrer">
+            GitHub ↗
+          </a>
+          <button className="btn primary" disabled={busy || !title.trim()} onClick={save}>
+            {busy ? 'saving…' : 'Save'}
+          </button>
+        </div>
       </div>
     </Modal>
   );
@@ -333,11 +362,9 @@ function CardInner({
 }) {
   const sub = subTagForState(item.state);
   return (
-    <div className={`kcard ${dragging ? 'dragging' : ''}`}>
-      <div className="row between">
-        <span className="muted small">#{item.number}</span>
-      </div>
-      <div style={{ margin: '6px 0', fontSize: 13 }}>{item.title}</div>
+    <div className={`kcard ${dragging ? 'dragging' : ''} ${item.activeAgent ? 'active' : ''}`}>
+      <span className="num">#{item.number}</span>
+      <div className="ktitle">{item.title}</div>
       <div className="row wrap" style={{ gap: 6 }}>
         <span className={`subtag ${item.type === 'bug' ? 'bug' : ''}`}>{item.type}</span>
         {item.activeAgent ? (
@@ -433,8 +460,6 @@ export function ProjectBoard({ projectId }: { projectId: string }) {
   const [creating, setCreating] = useState(false);
   const [editing, setEditing] = useState<BacklogItem>();
   const [activeId, setActiveId] = useState<number | null>(null);
-  const [autoDispatch, setAutoDispatch] = useState(false);
-  const [ticking, setTicking] = useState(false);
   const startColRef = useRef<string | undefined>(undefined);
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
@@ -454,31 +479,8 @@ export function ProjectBoard({ projectId }: { projectId: string }) {
 
   useEffect(() => {
     void load();
-    api.dispatchStatus().then((r) => setAutoDispatch(r.enabled)).catch(() => undefined);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId]);
-
-  const toggleAutoDispatch = async () => {
-    const next = !autoDispatch;
-    setAutoDispatch(next);
-    try {
-      await api.setDispatch(next);
-    } catch {
-      setAutoDispatch(!next); // revert on failure
-    }
-  };
-
-  const tickNow = async () => {
-    setTicking(true);
-    try {
-      await api.dispatchTick();
-      await load();
-    } catch (e) {
-      setErr(String(e instanceof Error ? e.message : e));
-    } finally {
-      setTicking(false);
-    }
-  };
 
   // Live board: when an agent picks up / finishes a run, the item moves and the
   // "working" badge appears/clears. Don't reload mid-drag (would disrupt it).
@@ -582,21 +584,7 @@ export function ProjectBoard({ projectId }: { projectId: string }) {
 
   return (
     <>
-      <div className="row between" style={{ marginBottom: 12, gap: 8 }}>
-        <div className="row" style={{ gap: 8, alignItems: 'center' }}>
-          <button
-            className={`btn sm ${autoDispatch ? 'primary' : ''}`}
-            onClick={toggleAutoDispatch}
-            title="When on, the Architect auto-picks-up the top Ready item whenever a slot is free (driven by the n8n trigger calling the dispatch endpoint)."
-          >
-            {autoDispatch ? '● Auto-dispatch ON' : '○ Auto-dispatch OFF'}
-          </button>
-          {autoDispatch && (
-            <button className="btn sm" disabled={ticking} onClick={tickNow}>
-              {ticking ? 'dispatching…' : 'Run dispatch now'}
-            </button>
-          )}
-        </div>
+      <div className="row" style={{ marginBottom: 12, justifyContent: 'flex-end' }}>
         <button className="btn sm primary" onClick={() => setCreating(true)}>
           + New work item
         </button>
@@ -628,9 +616,18 @@ export function ProjectBoard({ projectId }: { projectId: string }) {
         <NewItemModal
           projectId={projectId}
           onClose={() => setCreating(false)}
-          onCreated={() => {
+          onCreated={(item) => {
             setCreating(false);
-            void load();
+            // GitHub's issue list lags ~1s behind create, so a refetch here can
+            // miss the new item. Insert the returned item directly instead; the
+            // next ws event / drag reconciles ordering.
+            const colId = columnForState(item.state).id;
+            setByNumber((prev) => ({ ...prev, [item.number]: item }));
+            setColumns((prev) =>
+              prev[colId]?.includes(item.number)
+                ? prev
+                : { ...prev, [colId]: [item.number, ...(prev[colId] ?? [])] },
+            );
           }}
         />
       )}
@@ -642,6 +639,20 @@ export function ProjectBoard({ projectId }: { projectId: string }) {
           onSaved={() => {
             setEditing(undefined);
             void load();
+          }}
+          onDeleted={(number) => {
+            setEditing(undefined);
+            // Remove immediately; the closed issue drops out of the next fetch too.
+            setColumns((prev) => {
+              const next: Columns = {};
+              for (const k of Object.keys(prev)) next[k] = prev[k].filter((n) => n !== number);
+              return next;
+            });
+            setByNumber((prev) => {
+              const next = { ...prev };
+              delete next[number];
+              return next;
+            });
           }}
         />
       )}

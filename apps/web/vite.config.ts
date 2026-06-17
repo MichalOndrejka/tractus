@@ -12,8 +12,8 @@ export default defineConfig({
         name: 'Tractus',
         short_name: 'Tractus',
         description: 'Your autonomous AI software company.',
-        theme_color: '#04110d',
-        background_color: '#04110d',
+        theme_color: '#080b12',
+        background_color: '#080b12',
         display: 'standalone',
         orientation: 'portrait',
         icons: [

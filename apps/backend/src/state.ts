@@ -16,7 +16,7 @@ const PRIORITY_MAP: Record<string, number> = {
 };
 
 const VALID_STATES = new Set<string>(BACKLOG_STATES);
-const VALID_TYPES = new Set<BacklogItemType>(['feature', 'bug', 'chore', 'design']);
+const VALID_TYPES = new Set<BacklogItemType>(['feature', 'bug']);
 
 /** Derive the backlog state from an issue's labels (defaults to BACKLOG). */
 export function stateFromLabels(labels: string[]): BacklogState {

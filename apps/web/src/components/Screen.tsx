@@ -41,7 +41,10 @@ export function Screen({
         </span>
         <span className="spacer" />
         {actions}
-        <span className={`dot ${live ? 'live' : ''}`} title={live ? 'live' : 'offline'} />
+        <span className={`linkstate ${live ? 'live' : ''}`}>
+          <span className={`dot ${live ? 'live' : ''}`} />
+          {live ? 'live' : 'offline'}
+        </span>
       </header>
       <main className={fill ? 'page-fill' : 'page'}>{children}</main>
     </div>

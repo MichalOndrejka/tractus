@@ -168,13 +168,13 @@ export function AgentDetail() {
       <div className="card">
         <div className="row between">
           <span className="muted">Status</span>
-          <span style={{ color: agent.status === 'running' ? 'var(--accent)' : 'var(--text-dim)' }}>
+          <span style={{ color: agent.status === 'running' ? 'var(--signal)' : 'var(--text-dim)' }}>
             {agent.status}
           </span>
         </div>
         <div className="row between" style={{ marginTop: 10 }}>
           <span className="muted">Spent today</span>
-          <span style={{ color: spentPct > 80 ? 'var(--danger)' : 'var(--accent)' }}>
+          <span style={{ color: spentPct > 80 ? 'var(--danger)' : 'var(--signal)' }}>
             ${agent.spentTodayUsd.toFixed(2)} / ${agent.dailyBudgetUsd.toFixed(2)}
           </span>
         </div>
@@ -212,7 +212,7 @@ export function AgentDetail() {
           const lines = logsByRun[run.id] ?? [];
           const color =
             run.status === 'running'
-              ? 'var(--accent)'
+              ? 'var(--signal)'
               : run.status === 'done'
                 ? 'var(--text-dim)'
                 : 'var(--danger)';
