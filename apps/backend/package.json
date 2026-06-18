@@ -9,7 +9,7 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --import tsx --test --experimental-test-coverage --test-coverage-exclude=src/worker.ts --test-coverage-exclude=src/github.ts --test-coverage-exclude=src/ws.ts --test-coverage-exclude=test/** --test-coverage-exclude=**/packages/shared/** --test-coverage-lines=80 --test-coverage-functions=70 --test-coverage-branches=70 test/pipeline.test.ts test/state.test.ts test/db.test.ts test/http.test.ts"
+    "test": "node --import tsx --test --experimental-test-coverage --test-coverage-exclude=src/worker.ts --test-coverage-exclude=src/github.ts --test-coverage-exclude=src/ws.ts --test-coverage-exclude=test/** --test-coverage-exclude=**/packages/shared/** --test-coverage-lines=80 --test-coverage-functions=70 --test-coverage-branches=70 test/pipeline.test.ts test/state.test.ts test/db.test.ts test/http.test.ts test/worker-env.test.ts"
   },
   "dependencies": {
     "@tractus/shared": "*",

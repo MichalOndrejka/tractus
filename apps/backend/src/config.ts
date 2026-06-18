@@ -26,7 +26,17 @@ export const config = {
   // is parked in BLOCKED (prevents an infinite retry/spend loop under dispatch).
   maxRetries: num(process.env.MAX_RETRIES, 2),
   anthropicKey: process.env.ANTHROPIC_API_KEY ?? '',
+  // Base image new agents are created from until they have a trained snapshot.
   agentImage: process.env.AGENT_IMAGE ?? 'tractus/agent:latest',
+  // Prefix for per-type golden images produced by snapshotting (`<prefix><role>:<tag>`).
+  agentImagePrefix: process.env.AGENT_IMAGE_PREFIX ?? 'tractus/agent-',
+  // How long a persistent agent container may sit idle (no running run) before the
+  // reaper stops it to free resources. It is started again on the next dispatch.
+  agentIdleStopMs: num(process.env.AGENT_IDLE_STOP_MS, 10 * 60 * 1000),
+  // Auto-persist an agent's container to its own image whenever its environment
+  // changes (tooling installed, self-update) so the state is durable and inherited
+  // by spawned copies — no manual snapshot needed. Set '0' to disable.
+  autoSnapshot: process.env.AGENT_AUTO_SNAPSHOT !== '0',
   // Shared secret that lets an external trigger (n8n) call POST /api/dispatch/tick
   // without a browser session. Empty = the tick endpoint requires a logged-in session.
   dispatchToken: process.env.DISPATCH_TOKEN ?? '',

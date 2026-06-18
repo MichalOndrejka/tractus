@@ -272,6 +272,7 @@ input:focus, textarea:focus, select:focus {
   background: rgba(255, 183, 77, 0.06);
 }
 .banner.err { border-color: rgba(255, 100, 112, 0.5); color: var(--danger); background: rgba(255, 100, 112, 0.06); }
+.banner.ok { border-color: rgba(80, 220, 150, 0.5); color: var(--signal); background: rgba(80, 220, 150, 0.06); }
 
 .logbox {
   background: var(--field); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 12px;

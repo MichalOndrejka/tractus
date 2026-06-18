@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import type {
+  ConduitStatus,
   ProviderAuthMethod,
   ProviderConnection,
   ProviderInfo,
@@ -93,6 +94,109 @@ function ConnectModal({
   );
 }
 
+function MemoryPanel() {
+  const [status, setStatus] = useState<ConduitStatus>();
+  const [url, setUrl] = useState('');
+  const [apiKey, setApiKey] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string>();
+  const [healthy, setHealthy] = useState<boolean>();
+
+  useEffect(() => {
+    api
+      .conduit()
+      .then((s) => {
+        setStatus(s);
+        setUrl(s.url ?? '');
+      })
+      .catch(() => undefined);
+  }, []);
+
+  const save = async () => {
+    setBusy(true);
+    setErr(undefined);
+    try {
+      const s = await api.saveConduit({
+        url: url.trim(),
+        apiKey: apiKey.trim() || undefined,
+      });
+      setStatus(s);
+      setHealthy(s.healthy);
+      setApiKey('');
+    } catch (e) {
+      setErr(String(e instanceof Error ? e.message : e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const toggleMemory = async (enabled: boolean) => {
+    const s = await api.saveConduit({ memoryEnabled: enabled });
+    setStatus(s);
+  };
+
+  const disconnect = async () => {
+    const s = await api.disconnectConduit();
+    setStatus(s);
+    setUrl('');
+    setHealthy(undefined);
+  };
+
+  return (
+    <div className="card">
+      <div className="row between">
+        <div className="row" style={{ gap: 10 }}>
+          <span style={{ fontWeight: 700 }}>Memory (conduit)</span>
+          {status?.connected && <span className="tag state">connected</span>}
+          {healthy === true && <span className="tag state">healthy</span>}
+          {healthy === false && <span className="tag">unreachable</span>}
+        </div>
+        {status?.connected && (
+          <button className="btn sm" onClick={disconnect}>
+            disconnect
+          </button>
+        )}
+      </div>
+      <p className="muted small" style={{ margin: '8px 0 12px', lineHeight: 1.5 }}>
+        A shared experience store reached over MCP. All agents read and write one pooled memory —
+        each run recalls relevant lessons before acting and stores what it learned at the end.
+      </p>
+
+      <div className="field">
+        <label>Conduit MCP URL</label>
+        <input
+          placeholder="http://localhost:8000/mcp"
+          value={url}
+          onChange={(e) => setUrl(e.target.value)}
+        />
+      </div>
+      <div className="field">
+        <label>API key {status?.hasKey && <span className="muted small">(saved — leave blank to keep)</span>}</label>
+        <input
+          type="password"
+          placeholder="conduit bearer key"
+          value={apiKey}
+          onChange={(e) => setApiKey(e.target.value)}
+        />
+      </div>
+      {err && <div className="banner err">{err}</div>}
+      <div className="row between">
+        <label className="row" style={{ gap: 8 }}>
+          <input
+            type="checkbox"
+            checked={status?.memoryEnabled ?? true}
+            onChange={(e) => toggleMemory(e.target.checked)}
+          />
+          <span className="muted small">memory enabled</span>
+        </label>
+        <button className="btn primary sm" disabled={!url.trim() || busy} onClick={save}>
+          {busy ? 'saving…' : status?.connected ? 'Update' : 'Connect'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export function Providers() {
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [connections, setConnections] = useState<ProviderConnection[]>([]);
@@ -125,7 +229,8 @@ export function Providers() {
       {loading ? (
         <div className="spinner">loading providers…</div>
       ) : (
-        providers.map((p) => {
+        <>
+        {providers.map((p) => {
           const conn = connFor(p.id);
           return (
             <div className="card" key={p.id}>
@@ -156,7 +261,10 @@ export function Providers() {
               )}
             </div>
           );
-        })
+        })}
+        <div className="section-title">Memory</div>
+        <MemoryPanel />
+        </>
       )}
 
       {connecting && (

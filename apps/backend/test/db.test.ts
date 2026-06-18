@@ -137,6 +137,125 @@ test('setOrder / getPositions persist drag-rank', () => {
   assert.equal(pos.get(2), 2);
 });
 
+test('createAgent persists imageTag and exposes it back', () => {
+  const p = db.createProject({ name: 'IMG', repo: 'o/img' });
+  const a = db.createAgent({
+    projectId: p.id,
+    templateId: 'developer',
+    role: 'developer',
+    name: 'Trained Dev',
+    provider: 'claude-code',
+    model: 'claude-sonnet-4-6',
+    dailyBudgetUsd: 5,
+    instructions: 'x',
+    skills: [],
+    imageTag: 'tractus/agent-developer:snap-123',
+  });
+  assert.equal(a.imageTag, 'tractus/agent-developer:snap-123');
+  assert.equal(db.getAgent(a.id)?.imageTag, 'tractus/agent-developer:snap-123');
+});
+
+test('learning is off by default and toggles via updateAgent', () => {
+  const p = db.createProject({ name: 'L', repo: 'o/learn' });
+  const a = db.createAgent({
+    projectId: p.id,
+    templateId: 'developer',
+    role: 'developer',
+    name: 'D',
+    provider: 'claude-code',
+    model: 'claude-sonnet-4-6',
+    dailyBudgetUsd: 5,
+    instructions: 'v1',
+    skills: [],
+  });
+  assert.equal(a.learningEnabled, false);
+  const updated = db.updateAgent(a.id, { learningEnabled: true });
+  assert.equal(updated?.learningEnabled, true);
+  assert.equal(db.getAgent(a.id)?.learningEnabled, true);
+});
+
+test('learning history records, lists, and supports rollback', () => {
+  const p = db.createProject({ name: 'LH', repo: 'o/lh' });
+  const a = db.createAgent({
+    projectId: p.id,
+    templateId: 'developer',
+    role: 'developer',
+    name: 'D',
+    provider: 'claude-code',
+    model: 'claude-sonnet-4-6',
+    dailyBudgetUsd: 5,
+    instructions: 'v1 instructions',
+    skills: [],
+  });
+  const entry = db.recordLearning({
+    agentId: a.id,
+    beforeInstructions: 'v1 instructions',
+    afterInstructions: 'v2 instructions',
+    beforeSkills: [],
+    afterSkills: [],
+    summary: 'tightened scope',
+    sourceRunId: `${a.id}:r1`,
+  });
+  db.updateAgent(a.id, { instructions: 'v2 instructions' });
+
+  const list = db.listLearning(a.id);
+  assert.equal(list.length, 1);
+  assert.equal(list[0].summary, 'tightened scope');
+  assert.equal(db.getLearning(entry.id)?.afterInstructions, 'v2 instructions');
+
+  // Rollback restores the "before" instructions.
+  const restored = db.getLearning(entry.id)!;
+  db.updateAgent(a.id, { instructions: restored.beforeInstructions });
+  assert.equal(db.getAgent(a.id)?.instructions, 'v1 instructions');
+});
+
+test('agent snapshot create / get / list / delete', () => {
+  const snap = db.createSnapshot({
+    id: 'snap-1',
+    role: 'developer',
+    name: 'Trained Dev',
+    imageTag: 'tractus/agent-developer:snap-1',
+    instructions: 'be excellent',
+    skills: [{ id: 's1', name: 'tdd', content: 'write tests first' }],
+    notes: 'fast on this repo',
+  });
+  assert.equal(snap.imageTag, 'tractus/agent-developer:snap-1');
+  assert.equal(snap.skills[0].name, 'tdd');
+
+  const got = db.getSnapshot('snap-1');
+  assert.equal(got?.name, 'Trained Dev');
+  assert.equal(got?.notes, 'fast on this repo');
+  assert.ok(db.listSnapshots().some((s) => s.id === 'snap-1'));
+
+  db.deleteSnapshot('snap-1');
+  assert.equal(db.getSnapshot('snap-1'), undefined);
+});
+
+test('conduit config + memory flag store / status / clear', () => {
+  assert.equal(db.getConduitConfig(), undefined);
+  assert.equal(db.isMemoryEnabled(), true); // default on
+
+  db.setConduitConfig('http://localhost:8000/mcp', 'sk-conduit');
+  const c = db.getConduitConfig();
+  assert.equal(c?.url, 'http://localhost:8000/mcp');
+  assert.equal(c?.apiKey, 'sk-conduit');
+
+  const status = db.conduitStatus();
+  assert.equal(status.connected, true);
+  assert.equal(status.hasKey, true);
+  assert.ok(!('apiKey' in status)); // the key is never surfaced
+
+  db.setMemoryEnabled(false);
+  assert.equal(db.isMemoryEnabled(), false);
+
+  // Updating url without a key clears the stored key.
+  db.setConduitConfig('http://localhost:8000/mcp');
+  assert.equal(db.getConduitConfig()?.apiKey, undefined);
+
+  db.clearConduitConfig();
+  assert.equal(db.getConduitConfig(), undefined);
+});
+
 test('provider connection store / read / clear', () => {
   assert.equal(db.getProviderConnection('claude-code'), undefined);
   db.setProviderConnection('claude-code', { method: 'subscription', token: 'sk-oat-xyz' });

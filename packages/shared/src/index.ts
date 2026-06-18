@@ -129,6 +129,20 @@ export interface ProviderConnection {
   method?: ProviderAuthMethod;
 }
 
+/**
+ * Shared memory connection to conduit (the team's experience/RAG store, reached
+ * over MCP). One shared pool across all agents. The API key is never returned.
+ */
+export interface ConduitStatus {
+  connected: boolean;
+  url?: string;
+  hasKey: boolean;
+  /** Global toggle; only has effect once conduit is connected. */
+  memoryEnabled: boolean;
+  /** Result of a live health probe, when the status came from a write. */
+  healthy?: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Agent templates (catalog) + deployed agents (per project)
 // ---------------------------------------------------------------------------
@@ -252,6 +266,49 @@ export interface DeployedAgent {
   spentTodayUsd: number;
   instructions: string;
   skills: Skill[];
+  /** Docker image this agent's persistent container is created from. Empty = base image. */
+  imageTag?: string;
+  /** When true, the agent reflects after a task and rewrites its own instructions. Off by default. */
+  learningEnabled: boolean;
+  createdAt: string;
+}
+
+/** A recorded self-improvement: instructions/skills before vs after, for rollback. */
+export interface AgentLearning {
+  id: string;
+  agentId: string;
+  beforeInstructions: string;
+  afterInstructions: string;
+  beforeSkills: Skill[];
+  afterSkills: Skill[];
+  summary: string;
+  sourceRunId?: string;
+  createdAt: string;
+}
+
+export type ContainerState = 'running' | 'stopped' | 'absent';
+
+/** Live status of an agent's persistent container. */
+export interface AgentContainerStatus {
+  agentId: string;
+  name: string;
+  state: ContainerState;
+  image?: string;
+}
+
+/**
+ * A stored, trained agent state captured from an efficient agent: a committed
+ * container image (tooling) plus its instructions/skills. Spawn N copies from it.
+ */
+export interface AgentSnapshot {
+  id: string;
+  role: AgentRole;
+  name: string;
+  /** Committed Docker image tag holding the trained environment. */
+  imageTag: string;
+  instructions: string;
+  skills: Skill[];
+  notes?: string;
   createdAt: string;
 }
 

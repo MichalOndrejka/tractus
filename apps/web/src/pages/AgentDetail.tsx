@@ -1,6 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import type { BacklogItem, DeployedAgent, LogLine, Run } from '@tractus/shared';
+import type {
+  AgentContainerStatus,
+  AgentLearning,
+  AgentSnapshot,
+  BacklogItem,
+  DeployedAgent,
+  LogLine,
+  Run,
+} from '@tractus/shared';
 import { Screen } from '../components/Screen.js';
 import { Modal } from '../components/Modal.js';
 import { AgentForm, type AgentDraft } from '../components/AgentForm.js';
@@ -73,6 +81,14 @@ export function AgentDetail() {
   const [saved, setSaved] = useState(false);
   const [picking, setPicking] = useState(false);
   const [runErr, setRunErr] = useState<string>();
+  const [container, setContainer] = useState<AgentContainerStatus>();
+  const [envBusy, setEnvBusy] = useState(false);
+  const [snapshot, setSnapshot] = useState<AgentSnapshot>();
+  const [snapBusy, setSnapBusy] = useState(false);
+  const [snapErr, setSnapErr] = useState<string>();
+  const [copies, setCopies] = useState(2);
+  const [spawnMsg, setSpawnMsg] = useState<string>();
+  const [learning, setLearning] = useState<AgentLearning[]>([]);
   const agentRef = useRef(agentId);
   agentRef.current = agentId;
 
@@ -90,6 +106,8 @@ export function AgentDetail() {
       );
       setLogsByRun(seed);
     });
+    api.container(agentId).then((r) => setContainer(r.container)).catch(() => undefined);
+    api.learning(agentId).then((r) => setLearning(r.learning)).catch(() => undefined);
   }, [agentId]);
 
   // live stream: append logs + run status for this agent's runs
@@ -161,6 +179,60 @@ export function AgentDetail() {
     navigate(`/projects/${projectId}?tab=agents`);
   };
 
+  const toggleContainer = async (start: boolean) => {
+    setEnvBusy(true);
+    try {
+      const { container: c } = start
+        ? await api.startContainer(agentId)
+        : await api.stopContainer(agentId);
+      setContainer(c);
+    } catch (e) {
+      setRunErr(String(e instanceof Error ? e.message : e));
+    } finally {
+      setEnvBusy(false);
+    }
+  };
+
+  const takeSnapshot = async () => {
+    setSnapBusy(true);
+    setSnapErr(undefined);
+    setSpawnMsg(undefined);
+    try {
+      const { snapshot: s } = await api.snapshotAgent(agentId);
+      setSnapshot(s);
+    } catch (e) {
+      setSnapErr(String(e instanceof Error ? e.message : e));
+    } finally {
+      setSnapBusy(false);
+    }
+  };
+
+  const spawnCopies = async () => {
+    if (!snapshot) return;
+    setSnapBusy(true);
+    setSnapErr(undefined);
+    try {
+      const { agents } = await api.spawnFromSnapshot(snapshot.id, projectId, copies);
+      setSpawnMsg(`Spawned ${agents.length} cop${agents.length === 1 ? 'y' : 'ies'} into this project.`);
+    } catch (e) {
+      setSnapErr(String(e instanceof Error ? e.message : e));
+    } finally {
+      setSnapBusy(false);
+    }
+  };
+
+  const toggleLearning = async (enabled: boolean) => {
+    const { agent: updated } = await api.updateAgent(agentId, { learningEnabled: enabled });
+    setAgent(updated);
+  };
+
+  const rollback = async (entryId: string) => {
+    const { agent: updated } = await api.rollbackLearning(agentId, entryId);
+    setAgent(updated);
+    setDraft(draftFromAgent(updated));
+    api.learning(agentId).then((r) => setLearning(r.learning)).catch(() => undefined);
+  };
+
   const spentPct = Math.min(100, (agent.spentTodayUsd / Math.max(agent.dailyBudgetUsd, 0.01)) * 100);
 
   return (
@@ -189,6 +261,124 @@ export function AgentDetail() {
           {agent.status === 'running' ? 'running…' : '▶ Run on a work item'}
         </button>
         {runErr && <div className="banner err" style={{ marginTop: 10 }}>{runErr}</div>}
+      </div>
+
+      <div className="section-title">Environment</div>
+      <div className="card">
+        <div className="row between">
+          <span className="muted">Container</span>
+          <span
+            style={{
+              color: container?.state === 'running' ? 'var(--signal)' : 'var(--text-dim)',
+            }}
+          >
+            {container?.state ?? '…'}
+          </span>
+        </div>
+        {container?.image && (
+          <div className="row between" style={{ marginTop: 8 }}>
+            <span className="muted">Image</span>
+            <code className="small">{container.image}</code>
+          </div>
+        )}
+        <p className="muted small" style={{ margin: '8px 0 12px' }}>
+          A long-lived container per agent. Tooling and the repo clone persist across runs;
+          it’s stopped when idle to save resources and started again on dispatch. Environment
+          changes (installed tooling, self-updates) are saved automatically to the agent’s own
+          image, so spawned copies inherit them — no manual snapshot needed.
+        </p>
+        <div className="row between">
+          <button
+            className="btn sm"
+            disabled={envBusy || container?.state === 'stopped' || container?.state === 'absent'}
+            onClick={() => toggleContainer(false)}
+          >
+            stop
+          </button>
+          <button
+            className="btn sm"
+            disabled={envBusy || container?.state === 'running'}
+            onClick={() => toggleContainer(true)}
+          >
+            {container?.state === 'absent' ? 'create & start' : 'start'}
+          </button>
+        </div>
+      </div>
+
+      <div className="section-title">Snapshot &amp; multiply</div>
+      <div className="card">
+        <p className="muted small" style={{ marginTop: 0 }}>
+          Fork this trained agent into identical copies. Its environment is already saved
+          automatically; this captures the current image + instructions/skills as a named
+          snapshot you can multiply into a project.
+        </p>
+        {snapErr && <div className="banner err" style={{ marginBottom: 10 }}>{snapErr}</div>}
+        {!snapshot ? (
+          <button className="btn" disabled={snapBusy} onClick={takeSnapshot}>
+            {snapBusy ? 'snapshotting…' : '📸 Snapshot this agent'}
+          </button>
+        ) : (
+          <>
+            <div className="row between" style={{ marginBottom: 10 }}>
+              <span className="muted small">image</span>
+              <code className="small">{snapshot.imageTag}</code>
+            </div>
+            <div className="row between">
+              <label className="muted small">
+                copies{' '}
+                <input
+                  type="number"
+                  min={1}
+                  max={20}
+                  value={copies}
+                  onChange={(e) => setCopies(Math.max(1, Math.min(20, Number(e.target.value) || 1)))}
+                  style={{ width: 56 }}
+                />
+              </label>
+              <button className="btn primary sm" disabled={snapBusy} onClick={spawnCopies}>
+                {snapBusy ? 'spawning…' : 'Spawn copies'}
+              </button>
+            </div>
+          </>
+        )}
+        {spawnMsg && <div className="banner ok" style={{ marginTop: 10 }}>{spawnMsg}</div>}
+      </div>
+
+      <div className="section-title">Learning</div>
+      <div className="card">
+        <div className="row between">
+          <label className="row" style={{ gap: 8 }}>
+            <input
+              type="checkbox"
+              checked={agent.learningEnabled}
+              onChange={(e) => toggleLearning(e.target.checked)}
+            />
+            <span>self-improve after tasks</span>
+          </label>
+          <span className="muted small">{agent.learningEnabled ? 'on' : 'off (default)'}</span>
+        </div>
+        <p className="muted small" style={{ margin: '8px 0 0', lineHeight: 1.5 }}>
+          When on, the agent reflects after a task — using the transcript and your approval
+          feedback — and rewrites its own instructions. Changes apply automatically; every
+          version is kept here so you can roll back.
+        </p>
+        {learning.length > 0 && (
+          <div style={{ marginTop: 12 }}>
+            {learning.map((l) => (
+              <div className="card" key={l.id} style={{ marginBottom: 8 }}>
+                <div className="row between">
+                  <span className="small">{l.summary}</span>
+                  <button className="btn sm" onClick={() => rollback(l.id)}>
+                    roll back
+                  </button>
+                </div>
+                <div className="muted small" style={{ marginTop: 4 }}>
+                  {new Date(l.createdAt).toLocaleString()}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="section-title">Customization</div>

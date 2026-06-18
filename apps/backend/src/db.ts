@@ -3,6 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type {
+  AgentSnapshot,
   Approval,
   BudgetStatus,
   DeployedAgent,
@@ -122,6 +123,30 @@ db.exec(`
     ts         TEXT NOT NULL,
     payload    TEXT
   );
+
+  CREATE TABLE IF NOT EXISTS agent_snapshot (
+    id           TEXT PRIMARY KEY,
+    role         TEXT NOT NULL,
+    name         TEXT NOT NULL,
+    image_tag    TEXT NOT NULL,
+    instructions TEXT NOT NULL DEFAULT '',
+    skills       TEXT NOT NULL DEFAULT '[]',
+    notes        TEXT,
+    created_at   TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS agent_learning (
+    id                   TEXT PRIMARY KEY,
+    agent_id             TEXT NOT NULL,
+    before_instructions  TEXT NOT NULL DEFAULT '',
+    after_instructions   TEXT NOT NULL DEFAULT '',
+    before_skills        TEXT NOT NULL DEFAULT '[]',
+    after_skills         TEXT NOT NULL DEFAULT '[]',
+    summary              TEXT NOT NULL DEFAULT '',
+    source_run_id        TEXT,
+    created_at           TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_learning_agent ON agent_learning(agent_id);
 `);
 
 // --- lightweight migrations (add columns to pre-existing tables) -----------
@@ -136,6 +161,8 @@ ensureColumn('project', 'default_branch', 'default_branch TEXT');
 ensureColumn('agent', 'instructions', "instructions TEXT NOT NULL DEFAULT ''");
 ensureColumn('agent', 'skills', "skills TEXT NOT NULL DEFAULT '[]'");
 ensureColumn('agent', 'provider', "provider TEXT NOT NULL DEFAULT 'claude-code'");
+ensureColumn('agent', 'image_tag', "image_tag TEXT NOT NULL DEFAULT ''");
+ensureColumn('agent', 'learning_enabled', 'learning_enabled INTEGER NOT NULL DEFAULT 0');
 
 // Migrate legacy model-tier values ('sonnet'/'haiku'/'opus') -> concrete ids.
 for (const [tier, id] of Object.entries({
@@ -294,6 +321,16 @@ export function hasCompletedRunForRole(repo: string, issueNumber: number, role: 
     )
     .get(repo, issueNumber, role);
   return Boolean(row);
+}
+
+/** Most recent run on an item (any status), if any. */
+export function latestRunForItem(repo: string, issueNumber: number): Run | undefined {
+  const row = db
+    .prepare(
+      'SELECT * FROM run WHERE repo = ? AND issue_number = ? ORDER BY started_at DESC LIMIT 1',
+    )
+    .get(repo, issueNumber) as RunRow | undefined;
+  return row ? mapRun(row) : undefined;
 }
 
 /** Most recent PR URL produced for an item, if any. */
@@ -477,6 +514,55 @@ export const getGithubToken = () => getState(GH_TOKEN_KEY);
 export const setGithubToken = (token: string) => setState(GH_TOKEN_KEY, token);
 export const clearGithubToken = () => deleteState(GH_TOKEN_KEY);
 
+// --- conduit memory connection (shared experience store; key never returned) -
+
+export interface ConduitConfig {
+  url: string;
+  apiKey?: string;
+}
+
+export function getConduitConfig(): ConduitConfig | undefined {
+  const url = getState('conduit_url');
+  if (!url) return undefined;
+  return { url, apiKey: getState('conduit_api_key') };
+}
+
+export function setConduitConfig(url: string, apiKey?: string): void {
+  setState('conduit_url', url);
+  if (apiKey && apiKey.trim()) setState('conduit_api_key', apiKey.trim());
+  else deleteState('conduit_api_key');
+}
+
+export function clearConduitConfig(): void {
+  deleteState('conduit_url');
+  deleteState('conduit_api_key');
+}
+
+/** Public view of the conduit connection (the API key is never returned). */
+export function conduitStatus(): {
+  connected: boolean;
+  url?: string;
+  hasKey: boolean;
+  memoryEnabled: boolean;
+} {
+  const c = getConduitConfig();
+  return {
+    connected: Boolean(c?.url),
+    url: c?.url,
+    hasKey: Boolean(c?.apiKey),
+    memoryEnabled: isMemoryEnabled(),
+  };
+}
+
+/** Memory is on by default; the flag only has effect once conduit is connected. */
+export function isMemoryEnabled(): boolean {
+  return getState('memory_enabled') !== 'false';
+}
+
+export function setMemoryEnabled(on: boolean): void {
+  setState('memory_enabled', on ? 'true' : 'false');
+}
+
 // --- provider connections (agentic system credentials; never returned) ------
 
 export interface StoredProviderConnection {
@@ -598,6 +684,8 @@ interface AgentRow {
   daily_budget_usd: number;
   instructions: string;
   skills: string;
+  image_tag: string;
+  learning_enabled: number;
   created_at: string;
 }
 
@@ -631,6 +719,8 @@ function mapAgent(r: AgentRow): DeployedAgent {
     spentTodayUsd: spentTodayForAgent(r.id),
     instructions: r.instructions ?? '',
     skills,
+    imageTag: r.image_tag || undefined,
+    learningEnabled: Boolean(r.learning_enabled),
     createdAt: r.created_at,
   };
 }
@@ -657,12 +747,13 @@ export function createAgent(input: {
   dailyBudgetUsd: number;
   instructions: string;
   skills: DeployedAgent['skills'];
+  imageTag?: string;
 }): DeployedAgent {
   const id = randomUUID();
   const createdAt = new Date().toISOString();
   db.prepare(
-    `INSERT INTO agent(id, project_id, template_id, role, name, provider, model, status, daily_budget_usd, instructions, skills, created_at)
-     VALUES(?, ?, ?, ?, ?, ?, ?, 'idle', ?, ?, ?, ?)`,
+    `INSERT INTO agent(id, project_id, template_id, role, name, provider, model, status, daily_budget_usd, instructions, skills, image_tag, created_at)
+     VALUES(?, ?, ?, ?, ?, ?, ?, 'idle', ?, ?, ?, ?, ?)`,
   ).run(
     id,
     input.projectId,
@@ -674,6 +765,7 @@ export function createAgent(input: {
     input.dailyBudgetUsd,
     input.instructions,
     JSON.stringify(input.skills ?? []),
+    input.imageTag ?? '',
     createdAt,
   );
   return getAgent(id)!;
@@ -689,12 +781,14 @@ export function updateAgent(
     model?: string;
     instructions?: string;
     skills?: DeployedAgent['skills'];
+    learningEnabled?: boolean;
+    imageTag?: string;
   },
 ): DeployedAgent | undefined {
   const existing = getAgent(id);
   if (!existing) return undefined;
   db.prepare(
-    `UPDATE agent SET daily_budget_usd = ?, status = ?, name = ?, provider = ?, model = ?, instructions = ?, skills = ?
+    `UPDATE agent SET daily_budget_usd = ?, status = ?, name = ?, provider = ?, model = ?, instructions = ?, skills = ?, learning_enabled = ?, image_tag = ?
      WHERE id = ?`,
   ).run(
     patch.dailyBudgetUsd ?? existing.dailyBudgetUsd,
@@ -704,6 +798,8 @@ export function updateAgent(
     patch.model ?? existing.model,
     patch.instructions ?? existing.instructions,
     JSON.stringify(patch.skills ?? existing.skills),
+    (patch.learningEnabled ?? existing.learningEnabled) ? 1 : 0,
+    patch.imageTag ?? existing.imageTag ?? '',
     id,
   );
   return getAgent(id);
@@ -711,6 +807,160 @@ export function updateAgent(
 
 export function deleteAgent(id: string): void {
   db.prepare('DELETE FROM agent WHERE id = ?').run(id);
+}
+
+// --- agent snapshots (trained states that can be multiplied) ----------------
+
+interface SnapshotRow {
+  id: string;
+  role: string;
+  name: string;
+  image_tag: string;
+  instructions: string;
+  skills: string;
+  notes: string | null;
+  created_at: string;
+}
+
+function mapSnapshot(r: SnapshotRow): AgentSnapshot {
+  let skills: AgentSnapshot['skills'] = [];
+  try {
+    skills = JSON.parse(r.skills || '[]');
+  } catch {
+    skills = [];
+  }
+  return {
+    id: r.id,
+    role: r.role as AgentSnapshot['role'],
+    name: r.name,
+    imageTag: r.image_tag,
+    instructions: r.instructions ?? '',
+    skills,
+    notes: r.notes ?? undefined,
+    createdAt: r.created_at,
+  };
+}
+
+export function listSnapshots(): AgentSnapshot[] {
+  const rows = db
+    .prepare('SELECT * FROM agent_snapshot ORDER BY created_at DESC')
+    .all() as SnapshotRow[];
+  return rows.map(mapSnapshot);
+}
+
+export function getSnapshot(id: string): AgentSnapshot | undefined {
+  const row = db.prepare('SELECT * FROM agent_snapshot WHERE id = ?').get(id) as
+    | SnapshotRow
+    | undefined;
+  return row ? mapSnapshot(row) : undefined;
+}
+
+export function createSnapshot(input: {
+  id: string;
+  role: string;
+  name: string;
+  imageTag: string;
+  instructions: string;
+  skills: AgentSnapshot['skills'];
+  notes?: string;
+}): AgentSnapshot {
+  const createdAt = new Date().toISOString();
+  db.prepare(
+    `INSERT INTO agent_snapshot(id, role, name, image_tag, instructions, skills, notes, created_at)
+     VALUES(?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    input.id,
+    input.role,
+    input.name,
+    input.imageTag,
+    input.instructions,
+    JSON.stringify(input.skills ?? []),
+    input.notes ?? null,
+    createdAt,
+  );
+  return getSnapshot(input.id)!;
+}
+
+export function deleteSnapshot(id: string): void {
+  db.prepare('DELETE FROM agent_snapshot WHERE id = ?').run(id);
+}
+
+// --- agent learning history (auto-applied self-improvement + rollback) -------
+
+interface LearningRow {
+  id: string;
+  agent_id: string;
+  before_instructions: string;
+  after_instructions: string;
+  before_skills: string;
+  after_skills: string;
+  summary: string;
+  source_run_id: string | null;
+  created_at: string;
+}
+
+function parseSkills(json: string): import('@tractus/shared').Skill[] {
+  try {
+    return JSON.parse(json || '[]');
+  } catch {
+    return [];
+  }
+}
+
+function mapLearning(r: LearningRow): import('@tractus/shared').AgentLearning {
+  return {
+    id: r.id,
+    agentId: r.agent_id,
+    beforeInstructions: r.before_instructions,
+    afterInstructions: r.after_instructions,
+    beforeSkills: parseSkills(r.before_skills),
+    afterSkills: parseSkills(r.after_skills),
+    summary: r.summary,
+    sourceRunId: r.source_run_id ?? undefined,
+    createdAt: r.created_at,
+  };
+}
+
+export function listLearning(agentId: string): import('@tractus/shared').AgentLearning[] {
+  const rows = db
+    .prepare('SELECT * FROM agent_learning WHERE agent_id = ? ORDER BY created_at DESC')
+    .all(agentId) as LearningRow[];
+  return rows.map(mapLearning);
+}
+
+export function getLearning(id: string): import('@tractus/shared').AgentLearning | undefined {
+  const row = db.prepare('SELECT * FROM agent_learning WHERE id = ?').get(id) as
+    | LearningRow
+    | undefined;
+  return row ? mapLearning(row) : undefined;
+}
+
+export function recordLearning(input: {
+  agentId: string;
+  beforeInstructions: string;
+  afterInstructions: string;
+  beforeSkills: DeployedAgent['skills'];
+  afterSkills: DeployedAgent['skills'];
+  summary: string;
+  sourceRunId?: string;
+}): import('@tractus/shared').AgentLearning {
+  const id = randomUUID();
+  const createdAt = new Date().toISOString();
+  db.prepare(
+    `INSERT INTO agent_learning(id, agent_id, before_instructions, after_instructions, before_skills, after_skills, summary, source_run_id, created_at)
+     VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    id,
+    input.agentId,
+    input.beforeInstructions,
+    input.afterInstructions,
+    JSON.stringify(input.beforeSkills ?? []),
+    JSON.stringify(input.afterSkills ?? []),
+    input.summary,
+    input.sourceRunId ?? null,
+    createdAt,
+  );
+  return getLearning(id)!;
 }
 
 function getFlag(key: string): boolean {

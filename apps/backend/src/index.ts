@@ -21,21 +21,31 @@ import {
   validateToken,
 } from './github.js';
 import {
+  clearConduitConfig,
   clearGithubToken,
   clearProviderConnection,
+  conduitStatus,
   createAgent,
   createProject,
   decideApproval,
   deleteAgent,
   deleteProject,
+  deleteSnapshot,
   getApproval,
   getAgent,
+  getSnapshot,
+  listSnapshots,
   getBudgetStatus,
   getGithubToken,
   getPositions,
   getProject,
+  getConduitConfig,
+  getLearning,
   getProviderConnection,
   latestPrUrlForItem,
+  listLearning,
+  setConduitConfig,
+  setMemoryEnabled,
   setProviderConnection,
   listActiveRuns,
   listAgents,
@@ -51,7 +61,19 @@ import {
 } from './db.js';
 import { addClient, broadcast } from './ws.js';
 import { registerAuth } from './auth.js';
-import { canDispatch, dispatchTick, launchRun, reconcileRunningRuns } from './worker.js';
+import {
+  canDispatch,
+  containerStatusFor,
+  dispatchTick,
+  ensureAgentContainer,
+  launchRun,
+  reapIdleContainers,
+  reconcileRunningRuns,
+  reflectOnApproval,
+  snapshotAgent,
+  stopAgentContainer,
+  templateForRole,
+} from './worker.js';
 
 export const app = Fastify({ logger: true });
 
@@ -151,6 +173,48 @@ app.delete('/api/providers/:id/connection', async (req, reply) => {
   }
   clearProviderConnection(id);
   return { connection: { id: id as AgentProvider, connected: false } satisfies ProviderConnection };
+});
+
+// --- conduit (shared memory over MCP) ---------------------------------------
+
+/** Best-effort liveness probe: conduit's /health sits at the MCP url's origin. */
+async function conduitHealthy(mcpUrl: string): Promise<boolean> {
+  try {
+    const u = new URL(mcpUrl);
+    u.pathname = '/health';
+    u.search = '';
+    const res = await fetch(u.toString(), { signal: AbortSignal.timeout(4000) });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+app.get('/api/conduit', async () => conduitStatus());
+
+app.put('/api/conduit', async (req, reply) => {
+  const { url, apiKey, memoryEnabled } = (req.body ?? {}) as {
+    url?: string;
+    apiKey?: string;
+    memoryEnabled?: boolean;
+  };
+  if (typeof memoryEnabled === 'boolean') setMemoryEnabled(memoryEnabled);
+  if (url !== undefined) {
+    if (!url.trim()) return reply.code(400).send({ error: 'url required' });
+    setConduitConfig(url.trim(), apiKey);
+  } else if (apiKey !== undefined) {
+    const existing = getConduitConfig();
+    if (!existing) return reply.code(400).send({ error: 'connect a url before setting a key' });
+    setConduitConfig(existing.url, apiKey);
+  }
+  const status = conduitStatus();
+  const healthy = status.url ? await conduitHealthy(status.url) : undefined;
+  return { ...status, healthy };
+});
+
+app.delete('/api/conduit', async () => {
+  clearConduitConfig();
+  return conduitStatus();
 });
 
 // --- projects ---------------------------------------------------------------
@@ -346,6 +410,7 @@ app.patch('/api/agents/:agentId', async (req, reply) => {
     model?: string;
     instructions?: string;
     skills?: Array<{ id: string; name: string; content: string }>;
+    learningEnabled?: boolean;
   };
   const agent = updateAgent(agentId, patch);
   if (!agent) return reply.code(404).send({ error: 'agent not found' });
@@ -392,6 +457,116 @@ app.post('/api/agents/:agentId/run', async (req, reply) => {
 
   const run = await launchRun({ agent, project, item, githubToken: token });
   return { run };
+});
+
+// --- agent containers (persistent environment) ------------------------------
+
+app.get('/api/agents/:agentId/container', async (req, reply) => {
+  const { agentId } = req.params as { agentId: string };
+  const agent = getAgent(agentId);
+  if (!agent) return reply.code(404).send({ error: 'agent not found' });
+  try {
+    return { container: await containerStatusFor(agent) };
+  } catch (err) {
+    app.log.error(err);
+    return reply.code(502).send({ error: 'failed to inspect container' });
+  }
+});
+
+app.post('/api/agents/:agentId/container/start', async (req, reply) => {
+  const { agentId } = req.params as { agentId: string };
+  const agent = getAgent(agentId);
+  if (!agent) return reply.code(404).send({ error: 'agent not found' });
+  try {
+    await ensureAgentContainer(agent);
+    return { container: await containerStatusFor(agent) };
+  } catch (err) {
+    app.log.error(err);
+    return reply.code(502).send({ error: 'failed to start container' });
+  }
+});
+
+app.post('/api/agents/:agentId/container/stop', async (req, reply) => {
+  const { agentId } = req.params as { agentId: string };
+  const agent = getAgent(agentId);
+  if (!agent) return reply.code(404).send({ error: 'agent not found' });
+  await stopAgentContainer(agentId);
+  return { container: await containerStatusFor(agent) };
+});
+
+// --- snapshots (capture a trained agent, then multiply) ---------------------
+
+app.get('/api/snapshots', async () => ({ snapshots: listSnapshots() }));
+
+// Commit the agent's container + record its instructions/skills as a snapshot.
+app.post('/api/agents/:agentId/snapshot', async (req, reply) => {
+  const { agentId } = req.params as { agentId: string };
+  const agent = getAgent(agentId);
+  if (!agent) return reply.code(404).send({ error: 'agent not found' });
+  const { notes } = (req.body ?? {}) as { notes?: string };
+  try {
+    return { snapshot: await snapshotAgent(agent, notes?.trim() || undefined) };
+  } catch (err) {
+    app.log.error(err);
+    return reply.code(409).send({ error: err instanceof Error ? err.message : 'snapshot failed' });
+  }
+});
+
+// Spawn N copies of a trained agent into a project (each from the snapshot image).
+app.post('/api/snapshots/:id/spawn', async (req, reply) => {
+  const { id } = req.params as { id: string };
+  const snapshot = getSnapshot(id);
+  if (!snapshot) return reply.code(404).send({ error: 'snapshot not found' });
+  const { projectId, count } = (req.body ?? {}) as { projectId?: string; count?: number };
+  if (!projectId || !getProject(projectId)) {
+    return reply.code(400).send({ error: 'valid projectId required' });
+  }
+  const n = Math.max(1, Math.min(20, Math.floor(count ?? 1)));
+  const template = templateForRole(snapshot.role);
+  const agents = Array.from({ length: n }, (_, i) =>
+    createAgent({
+      projectId,
+      templateId: template.id,
+      role: snapshot.role,
+      name: `${snapshot.name} ${i + 1}`,
+      provider: template.provider,
+      model: template.model,
+      dailyBudgetUsd: template.defaultDailyBudgetUsd,
+      instructions: snapshot.instructions,
+      skills: snapshot.skills,
+      imageTag: snapshot.imageTag,
+    }),
+  );
+  return { agents };
+});
+
+app.delete('/api/snapshots/:id', async (req) => {
+  const { id } = req.params as { id: string };
+  deleteSnapshot(id);
+  return { ok: true };
+});
+
+// --- learning (self-improvement history + rollback) -------------------------
+
+app.get('/api/agents/:agentId/learning', async (req, reply) => {
+  const { agentId } = req.params as { agentId: string };
+  if (!getAgent(agentId)) return reply.code(404).send({ error: 'agent not found' });
+  return { learning: listLearning(agentId) };
+});
+
+// Restore the instructions/skills this learning entry replaced.
+app.post('/api/agents/:agentId/learning/:entryId/rollback', async (req, reply) => {
+  const { agentId, entryId } = req.params as { agentId: string; entryId: string };
+  if (!getAgent(agentId)) return reply.code(404).send({ error: 'agent not found' });
+  const entry = getLearning(entryId);
+  if (!entry || entry.agentId !== agentId) {
+    return reply.code(404).send({ error: 'learning entry not found' });
+  }
+  const agent = updateAgent(agentId, {
+    instructions: entry.beforeInstructions,
+    skills: entry.beforeSkills,
+  });
+  return { agent };
 });
 
 // --- dispatch (auto-pickup of Ready items) ----------------------------------
@@ -450,6 +625,9 @@ app.post('/api/approvals/:id/decide', async (req, reply) => {
     return reply.code(502).send({ error: 'decided, but failed to update the work item state' });
   }
   if (decided) broadcast({ type: 'approval.updated', approval: decided });
+  // Feed the human's decision (+ comment) back to the agent that did the work, so
+  // a learning-enabled agent improves from the strongest available signal.
+  reflectOnApproval({ repo: approval.repo, issueNumber: approval.issueNumber, decision, comment });
   return { approval: decided };
 });
 
@@ -490,6 +668,8 @@ const start = async () => {
             if (r.dispatched.length) app.log.info({ dispatched: r.dispatched }, 'auto-dispatch');
           })
           .catch((err) => app.log.error(err, 'auto-dispatch tick failed'));
+        // Reclaim idle agent containers to free resources between runs.
+        reapIdleContainers().catch((err) => app.log.error(err, 'idle reaper failed'));
       }, config.dispatchIntervalMs).unref();
     }
   } catch (err) {

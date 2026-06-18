@@ -1,6 +1,10 @@
 import type {
   Approval,
+  AgentContainerStatus,
+  AgentLearning,
+  AgentSnapshot,
   AgentTemplate,
+  ConduitStatus,
   BacklogItem,
   BacklogItemType,
   BacklogState,
@@ -61,6 +65,12 @@ export const api = {
     }),
   disconnectProvider: (id: string) =>
     req<{ connection: ProviderConnection }>(`/api/providers/${id}/connection`, { method: 'DELETE' }),
+
+  // conduit (shared memory over MCP)
+  conduit: () => req<ConduitStatus>('/api/conduit'),
+  saveConduit: (input: { url?: string; apiKey?: string; memoryEnabled?: boolean }) =>
+    req<ConduitStatus>('/api/conduit', { method: 'PUT', body: JSON.stringify(input) }),
+  disconnectConduit: () => req<ConduitStatus>('/api/conduit', { method: 'DELETE' }),
 
   // projects
   projects: () => req<{ projects: Project[] }>('/api/projects'),
@@ -135,6 +145,7 @@ export const api = {
       model?: string;
       instructions?: string;
       skills?: Skill[];
+      learningEnabled?: boolean;
     },
   ) =>
     req<{ agent: DeployedAgent }>(`/api/agents/${agentId}`, {
@@ -148,6 +159,44 @@ export const api = {
     req<{ run: Run }>(`/api/agents/${agentId}/run`, {
       method: 'POST',
       body: JSON.stringify({ workItemNumber }),
+    }),
+
+  // persistent container (per agent)
+  container: (agentId: string) =>
+    req<{ container: AgentContainerStatus }>(`/api/agents/${agentId}/container`),
+  startContainer: (agentId: string) =>
+    req<{ container: AgentContainerStatus }>(`/api/agents/${agentId}/container/start`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    }),
+  stopContainer: (agentId: string) =>
+    req<{ container: AgentContainerStatus }>(`/api/agents/${agentId}/container/stop`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    }),
+
+  // snapshots (capture a trained agent, then multiply)
+  snapshots: () => req<{ snapshots: AgentSnapshot[] }>('/api/snapshots'),
+  snapshotAgent: (agentId: string, notes?: string) =>
+    req<{ snapshot: AgentSnapshot }>(`/api/agents/${agentId}/snapshot`, {
+      method: 'POST',
+      body: JSON.stringify({ notes }),
+    }),
+  spawnFromSnapshot: (snapshotId: string, projectId: string, count: number) =>
+    req<{ agents: DeployedAgent[] }>(`/api/snapshots/${snapshotId}/spawn`, {
+      method: 'POST',
+      body: JSON.stringify({ projectId, count }),
+    }),
+  deleteSnapshot: (snapshotId: string) =>
+    req<{ ok: true }>(`/api/snapshots/${snapshotId}`, { method: 'DELETE' }),
+
+  // learning (self-improvement history)
+  learning: (agentId: string) =>
+    req<{ learning: AgentLearning[] }>(`/api/agents/${agentId}/learning`),
+  rollbackLearning: (agentId: string, entryId: string) =>
+    req<{ agent: DeployedAgent }>(`/api/agents/${agentId}/learning/${entryId}/rollback`, {
+      method: 'POST',
+      body: JSON.stringify({}),
     }),
 
   // shared
