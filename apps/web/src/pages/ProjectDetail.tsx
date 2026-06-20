@@ -4,9 +4,10 @@ import type { Project } from '@tractus/shared';
 import { Screen } from '../components/Screen.js';
 import { ProjectBoard } from '../components/ProjectBoard.js';
 import { ProjectAgents } from '../components/ProjectAgents.js';
+import { SystemLog } from '../components/SystemLog.js';
 import { api } from '../api.js';
 
-type Tab = 'board' | 'agents';
+type Tab = 'board' | 'agents' | 'logs';
 
 export function ProjectDetail() {
   const { id } = useParams<{ id: string }>();
@@ -41,9 +42,21 @@ export function ProjectDetail() {
           >
             <span className="glyph">⌬</span> <span>Agents</span>
           </button>
+          <button
+            className={tab === 'logs' ? 'active' : ''}
+            onClick={() => setParams({ tab: 'logs' })}
+          >
+            <span className="glyph">⌗</span> <span>Logs</span>
+          </button>
         </nav>
         <div className="proj-content">
-          {tab === 'board' ? <ProjectBoard projectId={id} /> : <ProjectAgents projectId={id} />}
+          {tab === 'board' ? (
+            <ProjectBoard projectId={id} />
+          ) : tab === 'agents' ? (
+            <ProjectAgents projectId={id} />
+          ) : (
+            <SystemLog />
+          )}
         </div>
       </div>
     </Screen>

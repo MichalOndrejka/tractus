@@ -286,6 +286,30 @@ export interface AgentLearning {
   createdAt: string;
 }
 
+/**
+ * A persisted message in the direct chat with a deployed agent. `user` lines are
+ * what the operator typed; `agent` lines are the model's replies (produced by a
+ * one-shot run of the provider CLI inside the agent's own container, so the chat
+ * speaks with the agent's current instructions/skills and trained environment).
+ */
+export type ChatRole = 'user' | 'agent';
+
+export interface ChatMessage {
+  id: string;
+  agentId: string;
+  role: ChatRole;
+  content: string;
+  createdAt: string;
+}
+
+/** Rolled-up cost/token usage of an agent's whole chat thread. */
+export interface ChatUsage {
+  costUsd: number;
+  tokensIn: number;
+  tokensOut: number;
+  turns: number;
+}
+
 export type ContainerState = 'running' | 'stopped' | 'absent';
 
 /** Live status of an agent's persistent container. */
@@ -393,6 +417,14 @@ export interface Run {
 
 export type LogStream = 'stdout' | 'stderr' | 'tool' | 'system';
 
+/**
+ * Reserved `runId` for the global system log (dispatch passes, run/container
+ * failures, the budget breaker). System lines reuse the normal `{type:'log'}`
+ * stream; they're told apart from per-run logs by this id. Real run ids are
+ * `${uuid}:${nonce}`, so they never collide with this.
+ */
+export const SYSTEM_LOG_RUN_ID = 'system';
+
 export interface LogLine {
   id: number;
   runId: string;
@@ -424,6 +456,101 @@ export interface BudgetStatus {
   dispatchPaused: boolean;
   runningAgents: number;
   concurrencyLimit: number;
+}
+
+// ---------------------------------------------------------------------------
+// Workflow graph (the n8n-style "In Progress" pipeline editor)
+//
+// A per-project visual graph describing which agents run, and in what order,
+// inside the agent-controlled "In Progress" stage. A `source` node ("Ready
+// Tasks") marks the start of the pipeline and a `sink` node ("Done Tasks") marks
+// the end; edges carry one agent's output to the next. This is the editable
+// overlay behind the board's In Progress column. (Today it is authored and
+// persisted; the runtime still uses the built-in pipeline order — wiring the
+// executor to consume this graph is a clean follow-up.)
+// ---------------------------------------------------------------------------
+
+/** `source` = Ready Tasks (start, output only); `sink` = Done Tasks (end, input only). */
+export type WorkflowNodeKind = 'source' | 'sink' | 'agent';
+
+export interface WorkflowNode {
+  id: string;
+  kind: WorkflowNodeKind;
+  /** Display label on the tile, e.g. "Task Pool" or the agent's name. */
+  label: string;
+  /** For agent nodes: the role this node fills. */
+  role?: AgentRole;
+  /** Provenance of an agent node — the deployed agent (or template/snapshot) it came from. */
+  source?: { type: 'template' | 'snapshot' | 'agent'; id: string };
+  /** Canvas position (px, in the editor's own coordinate space). */
+  x: number;
+  y: number;
+}
+
+export interface WorkflowEdge {
+  id: string;
+  /** Source node id (output port). */
+  from: string;
+  /** Target node id (input port). */
+  to: string;
+}
+
+export interface WorkflowGraph {
+  nodes: WorkflowNode[];
+  edges: WorkflowEdge[];
+  /** ISO timestamp of the last save, set by the backend. */
+  updatedAt?: string;
+}
+
+/**
+ * The starter graph for a project that has never saved one: Ready Tasks feeding
+ * the four default roles in the canonical order (matches pipeline.ts), ending at
+ * Done Tasks. Laid out left→right as a pipeline.
+ */
+export function defaultWorkflowGraph(): WorkflowGraph {
+  const y = 200;
+  const roleNode = (role: AgentRole, label: string, x: number): WorkflowNode => ({
+    id: `agent-${role}`,
+    kind: 'agent',
+    label,
+    role,
+    source: { type: 'template', id: role },
+    x,
+    y,
+  });
+  const nodes: WorkflowNode[] = [
+    { id: 'source', kind: 'source', label: 'Ready Tasks', x: 40, y },
+    roleNode('architect', 'Architect', 300),
+    roleNode('developer', 'Software Developer', 560),
+    roleNode('tester', 'Tester / QA', 820),
+    roleNode('reviewer', 'Auto-Reviewer', 1080),
+    { id: 'sink', kind: 'sink', label: 'Done Tasks', x: 1340, y },
+  ];
+  const edge = (from: string, to: string): WorkflowEdge => ({ id: `${from}->${to}`, from, to });
+  const edges: WorkflowEdge[] = [
+    edge('source', 'agent-architect'),
+    edge('agent-architect', 'agent-developer'),
+    edge('agent-developer', 'agent-tester'),
+    edge('agent-tester', 'agent-reviewer'),
+    edge('agent-reviewer', 'sink'),
+  ];
+  return { nodes, edges };
+}
+
+/**
+ * A blank pipeline: only the Ready Tasks (start) and Done Tasks (end) terminals,
+ * no agents and no wiring. The starting point when the user resets to build their
+ * own flow from scratch.
+ */
+export function emptyWorkflowGraph(): WorkflowGraph {
+  const y = 200;
+  return {
+    nodes: [
+      { id: 'source', kind: 'source', label: 'Ready Tasks', x: 60, y },
+      { id: 'sink', kind: 'sink', label: 'Done Tasks', x: 560, y },
+    ],
+    edges: [],
+  };
 }
 
 // ---------------------------------------------------------------------------

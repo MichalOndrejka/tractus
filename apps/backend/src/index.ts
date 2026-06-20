@@ -5,11 +5,13 @@ import websocket from '@fastify/websocket';
 import {
   AGENT_PROVIDERS_INFO,
   AGENT_TEMPLATES,
+  defaultWorkflowGraph,
   type AgentProvider,
   type BacklogItemType,
   type BacklogState,
   type ProviderAuthMethod,
   type ProviderConnection,
+  type WorkflowGraph,
 } from '@tractus/shared';
 import { config } from './config.js';
 import {
@@ -21,6 +23,10 @@ import {
   validateToken,
 } from './github.js';
 import {
+  addBudgetCost,
+  addChatMessage,
+  chatUsage,
+  clearChatMessages,
   clearConduitConfig,
   clearGithubToken,
   clearProviderConnection,
@@ -41,17 +47,22 @@ import {
   getProject,
   getConduitConfig,
   getLearning,
+  getWorkflow,
+  setWorkflow,
   getProviderConnection,
   latestPrUrlForItem,
+  listChatMessages,
   listLearning,
   setConduitConfig,
   setMemoryEnabled,
   setProviderConnection,
   listActiveRuns,
   listAgents,
+  listAgentLogs,
   listApprovals,
   listLogs,
   listProjects,
+  listSystemLogs,
   listRuns,
   pendingApprovalFor,
   setGithubToken,
@@ -60,9 +71,13 @@ import {
   updateAgent,
 } from './db.js';
 import { addClient, broadcast } from './ws.js';
+import { slog } from './systemlog.js';
 import { registerAuth } from './auth.js';
 import {
+  applyChatConfig,
   canDispatch,
+  chatWithAgent,
+  type ChatTurn,
   containerStatusFor,
   dispatchTick,
   ensureAgentContainer,
@@ -295,6 +310,26 @@ app.put('/api/projects/:id/order', async (req, reply) => {
   return { ok: true };
 });
 
+// --- workflow graph (the In Progress pipeline editor) -----------------------
+
+// The saved n8n-style agent graph for a project; falls back to the default
+// pipeline (Task Pool -> architect -> developer -> tester -> reviewer).
+app.get('/api/projects/:id/workflow', async (req, reply) => {
+  const { id } = req.params as { id: string };
+  if (!getProject(id)) return reply.code(404).send({ error: 'project not found' });
+  return { workflow: getWorkflow(id) ?? defaultWorkflowGraph() };
+});
+
+app.put('/api/projects/:id/workflow', async (req, reply) => {
+  const { id } = req.params as { id: string };
+  if (!getProject(id)) return reply.code(404).send({ error: 'project not found' });
+  const { nodes, edges } = (req.body ?? {}) as Partial<WorkflowGraph>;
+  if (!Array.isArray(nodes) || !Array.isArray(edges)) {
+    return reply.code(400).send({ error: 'nodes[] and edges[] required' });
+  }
+  return { workflow: setWorkflow(id, { nodes, edges }) };
+});
+
 app.post('/api/projects/:id/issues', async (req, reply) => {
   const { id } = req.params as { id: string };
   const project = getProject(id);
@@ -427,6 +462,80 @@ app.get('/api/agents/:agentId/runs', async (req) => {
   const { agentId } = req.params as { agentId: string };
   const runs = listRuns().filter((r) => r.id.startsWith(`${agentId}:`));
   return { runs };
+});
+
+// Combined live log tail for an agent, aggregated across all of its runs.
+app.get('/api/agents/:agentId/logs', async (req, reply) => {
+  const { agentId } = req.params as { agentId: string };
+  if (!getAgent(agentId)) return reply.code(404).send({ error: 'agent not found' });
+  const { limit } = req.query as { limit?: string };
+  return { logs: listAgentLogs(agentId, Number(limit) || 500) };
+});
+
+// --- agent chat (direct operator <-> agent conversation) --------------------
+
+app.get('/api/agents/:agentId/chat', async (req, reply) => {
+  const { agentId } = req.params as { agentId: string };
+  if (!getAgent(agentId)) return reply.code(404).send({ error: 'agent not found' });
+  return { messages: listChatMessages(agentId), usage: chatUsage(agentId) };
+});
+
+// Lifetime cost/token totals for an agent's chat thread (feeds the Stats tab).
+app.get('/api/agents/:agentId/chat/usage', async (req, reply) => {
+  const { agentId } = req.params as { agentId: string };
+  if (!getAgent(agentId)) return reply.code(404).send({ error: 'agent not found' });
+  return { usage: chatUsage(agentId) };
+});
+
+// Send a message: persist it, run one chat turn in the agent's container, persist
+// the reply with the cost/tokens it spent (counted toward the daily budget too),
+// and return both lines. The full (persisted) history is replayed each turn.
+app.post('/api/agents/:agentId/chat', async (req, reply) => {
+  const { agentId } = req.params as { agentId: string };
+  const agent = getAgent(agentId);
+  if (!agent) return reply.code(404).send({ error: 'agent not found' });
+  const { message } = (req.body ?? {}) as { message?: string };
+  if (!message || !message.trim()) return reply.code(400).send({ error: 'message required' });
+
+  const history = listChatMessages(agentId);
+  const userMsg = addChatMessage(agentId, 'user', message.trim());
+  let turn: ChatTurn;
+  try {
+    turn = await chatWithAgent(agent, history, message.trim());
+  } catch (err) {
+    app.log.error(err);
+    turn = {
+      reply: `(chat failed: ${err instanceof Error ? err.message : String(err)})`,
+      costUsd: 0,
+      tokensIn: 0,
+      tokensOut: 0,
+    };
+  }
+  const agentMsg = addChatMessage(agentId, 'agent', turn.reply, {
+    costUsd: turn.costUsd,
+    tokensIn: turn.tokensIn,
+    tokensOut: turn.tokensOut,
+  });
+  if (turn.costUsd || turn.tokensIn || turn.tokensOut) {
+    addBudgetCost(turn.tokensIn, turn.tokensOut, turn.costUsd);
+  }
+  // If the agent asked to reconfigure itself this turn, apply it now.
+  let change: string | undefined;
+  if (turn.config) {
+    try {
+      change = applyChatConfig(agent, turn.config)?.summary;
+    } catch (err) {
+      app.log.error(err);
+    }
+  }
+  return { messages: [userMsg, agentMsg], usage: chatUsage(agentId), change };
+});
+
+app.delete('/api/agents/:agentId/chat', async (req, reply) => {
+  const { agentId } = req.params as { agentId: string };
+  if (!getAgent(agentId)) return reply.code(404).send({ error: 'agent not found' });
+  clearChatMessages(agentId);
+  return { ok: true };
 });
 
 // Launch a real run: spin up a Docker container for this agent on a work item.
@@ -585,6 +694,12 @@ app.get('/api/runs/:id/logs', async (req) => {
   return { logs: listLogs(id) };
 });
 
+// Global system log: dispatch passes, run/container failures, the budget breaker.
+app.get('/api/system/logs', async (req) => {
+  const { limit } = req.query as { limit?: string };
+  return { logs: listSystemLogs(Number(limit) || 500) };
+});
+
 app.get('/api/approvals', async (req) => {
   const { state } = req.query as { state?: 'pending' | 'approved' | 'rejected' };
   return { approvals: listApprovals(state) };
@@ -639,6 +754,7 @@ app.get('/api/budget', async () => {
 app.post('/api/budget/pause', async (req) => {
   const { paused } = (req.body ?? {}) as { paused?: boolean };
   setState('dispatch_paused', paused ? 'true' : 'false');
+  slog('system', paused ? 'dispatch paused by operator' : 'dispatch resumed by operator');
   return { ok: true };
 });
 
@@ -655,9 +771,13 @@ const start = async () => {
   try {
     await app.listen({ port: config.port, host: '0.0.0.0' });
     app.log.info(`Tractus backend on http://localhost:${config.port}`);
+    slog('system', `backend started on :${config.port}`);
     // Recover from any prior crash/restart: re-attach to still-running agent
     // containers and finalize the rest, so no run is left stranded as `running`.
-    await reconcileRunningRuns().catch((err) => app.log.error(err, 'run reconciliation failed'));
+    await reconcileRunningRuns().catch((err) => {
+      app.log.error(err, 'run reconciliation failed');
+      slog('stderr', `run reconciliation failed: ${String(err)}`);
+    });
     // Internal auto-dispatch loop: every tick, free agents pull Ready items.
     // Runs only when bound directly (not under tests); .unref() so it never keeps
     // the process alive on its own. An external n8n trigger remains optional.
@@ -667,9 +787,15 @@ const start = async () => {
           .then((r) => {
             if (r.dispatched.length) app.log.info({ dispatched: r.dispatched }, 'auto-dispatch');
           })
-          .catch((err) => app.log.error(err, 'auto-dispatch tick failed'));
+          .catch((err) => {
+            app.log.error(err, 'auto-dispatch tick failed');
+            slog('stderr', `auto-dispatch tick failed: ${String(err)}`);
+          });
         // Reclaim idle agent containers to free resources between runs.
-        reapIdleContainers().catch((err) => app.log.error(err, 'idle reaper failed'));
+        reapIdleContainers().catch((err) => {
+          app.log.error(err, 'idle reaper failed');
+          slog('stderr', `idle container reaper failed: ${String(err)}`);
+        });
       }, config.dispatchIntervalMs).unref();
     }
   } catch (err) {

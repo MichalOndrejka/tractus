@@ -256,6 +256,52 @@ test('conduit config + memory flag store / status / clear', () => {
   assert.equal(db.getConduitConfig(), undefined);
 });
 
+test('listAgentLogs aggregates an agent runs logs (chronological, limited)', () => {
+  const agentId = 'agent-logs-1';
+  db.addLog(`${agentId}:r1`, 'system', 'first');
+  db.addLog(`${agentId}:r1`, 'stdout', 'second');
+  db.addLog(`${agentId}:r2`, 'stderr', 'third');
+  db.addLog('other-agent:r1', 'stdout', 'unrelated');
+
+  const all = db.listAgentLogs(agentId);
+  assert.deepEqual(all.map((l) => l.content), ['first', 'second', 'third']);
+  assert.ok(all.every((l) => l.runId.startsWith(`${agentId}:`)));
+
+  // limit returns the most-recent N, still in chronological order.
+  const tail = db.listAgentLogs(agentId, 2);
+  assert.deepEqual(tail.map((l) => l.content), ['second', 'third']);
+});
+
+test('slog writes to the system feed and listSystemLogs reads it back', async () => {
+  const { slog } = await import('../src/systemlog.js');
+  const before = db.listSystemLogs().length;
+  slog('system', 'dispatch held: test');
+  slog('stderr', 'run #1 (architect) failed: boom');
+  const after = db.listSystemLogs();
+  assert.equal(after.length, before + 2);
+  assert.equal(after[after.length - 1].content, 'run #1 (architect) failed: boom');
+  assert.equal(after[after.length - 1].stream, 'stderr');
+});
+
+test('workflow graph is undefined until saved, then round-trips with updatedAt', () => {
+  const p = db.createProject({ name: 'WF', repo: 'o/wf' });
+  assert.equal(db.getWorkflow(p.id), undefined);
+
+  const saved = db.setWorkflow(p.id, {
+    nodes: [
+      { id: 'source', kind: 'source', label: 'Task Pool', x: 0, y: 0 },
+      { id: 'a1', kind: 'agent', label: 'Archie', role: 'architect', x: 200, y: 0 },
+    ],
+    edges: [{ id: 'e1', from: 'source', to: 'a1' }],
+  });
+  assert.ok(saved.updatedAt, 'updatedAt stamped on save');
+
+  const got = db.getWorkflow(p.id);
+  assert.equal(got?.nodes.length, 2);
+  assert.equal(got?.edges[0].to, 'a1');
+  assert.equal(got?.updatedAt, saved.updatedAt);
+});
+
 test('provider connection store / read / clear', () => {
   assert.equal(db.getProviderConnection('claude-code'), undefined);
   db.setProviderConnection('claude-code', { method: 'subscription', token: 'sk-oat-xyz' });

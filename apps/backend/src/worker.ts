@@ -3,6 +3,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { Readable } from 'node:stream';
 import {
   AGENT_TEMPLATES,
+  providerInfo,
   type AgentRole,
   type AgentSnapshot,
   type BacklogItem,
@@ -12,6 +13,7 @@ import {
   type LogStream,
   type Project,
   type Run,
+  type Skill,
 } from '@tractus/shared';
 import { config } from './config.js';
 import {
@@ -50,6 +52,7 @@ import {
   pickupState,
   routeAfterRun,
 } from './pipeline.js';
+import { slog } from './systemlog.js';
 import { broadcast } from './ws.js';
 
 /** Can we start another run right now? (concurrency + budget breaker) */
@@ -118,7 +121,11 @@ export async function dispatchTick(): Promise<DispatchResult> {
 
   const dispatched: DispatchResult['dispatched'] = [];
   for (const project of listProjects()) {
-    if (!canDispatch().ok) break;
+    const gate = canDispatch();
+    if (!gate.ok) {
+      slog('system', `dispatch held: ${gate.reason}`);
+      break;
+    }
     // Idle agents grouped by role; those over their daily budget are skipped
     // (no effect under flat-cost subscriptions).
     const idle = listAgents(project.id).filter((a) => a.status === 'idle' && isWithinBudget(a));
@@ -156,6 +163,7 @@ export async function dispatchTick(): Promise<DispatchResult> {
       const agent = pools[role]?.shift();
       if (!agent) continue; // no idle agent for this stage — item waits
       await launchRun({ agent, project, item, githubToken: token });
+      slog('system', `dispatched ${agent.name} → #${item.number} (${role})`);
       dispatched.push({
         projectId: project.id,
         itemNumber: item.number,
@@ -450,6 +458,7 @@ function routeItemAfterRun(ctx: RunContext, ok: boolean): void {
   }
   if (route.state === 'BLOCKED') {
     emit(ctx.runId, 'system', `failed ${config.maxRetries}× — parking in BLOCKED (won't auto-retry)`);
+    slog('stderr', `#${ctx.issueNumber} parked in BLOCKED after ${config.maxRetries + 1} failed ${ctx.role} runs — see the agent's log for the cause`);
   }
   const token = getGithubToken() ?? '';
   updateIssue(token, ctx.repo, ctx.issueNumber, { state: route.state })
@@ -473,6 +482,11 @@ function finalizeRun(
   addBudgetCost(fields.tokensIn ?? 0, fields.tokensOut ?? 0, fields.costUsd ?? 0);
   updateAgent(ctx.agentId, { status: 'idle' });
   if (r) broadcast({ type: 'run.updated', run: r });
+  // Surface terminal failures in the global system log so a BLOCKED item is
+  // explainable from the UI (this funnels docker/image/clone failures alike).
+  if (status !== 'done') {
+    slog('stderr', `run #${ctx.issueNumber} (${ctx.role}) ${status}: ${fields.exitReason}`);
+  }
   // Mark the container idle so the reaper can reclaim it after the grace window.
   touchContainer(agentContainerName(ctx.agentId));
   routeItemAfterRun(ctx, status === 'done');
@@ -767,6 +781,283 @@ export async function snapshotAgent(agent: DeployedAgent, notes?: string): Promi
 /** Defaults (model/budget/template) for a role, used when spawning from a snapshot. */
 export function templateForRole(role: AgentRole) {
   return AGENT_TEMPLATES.find((t) => t.role === role) ?? AGENT_TEMPLATES[0];
+}
+
+// ---------------------------------------------------------------------------
+// Direct chat (operator <-> agent)
+// ---------------------------------------------------------------------------
+
+/** Build the single prompt for a chat turn: the agent's persona + skills, the
+ *  recent conversation, the new user message, and the self-reconfiguration
+ *  protocol. The provider CLI is stateless per call, so we replay the
+ *  (already-persisted) history every turn. */
+function buildChatPrompt(
+  agent: DeployedAgent,
+  history: Array<{ role: 'user' | 'agent'; content: string }>,
+  message: string,
+): string {
+  const skills = agent.skills.length
+    ? agent.skills.map((s) => `- ${s.name}: ${s.content}`).join('\n')
+    : '(none)';
+  const models = providerInfo(agent.provider).models.map((m) => m.id).join(', ');
+  const convo = history
+    .map((m) => `${m.role === 'user' ? 'Operator' : 'You'}: ${m.content}`)
+    .join('\n');
+  return [
+    `You are "${agent.name}", a deployed ${agent.role} agent. You are chatting directly`,
+    'with your operator. Answer concisely and in your own voice, grounded in your',
+    'operating instructions and skills below. This is a conversation, not a task —',
+    'do not open pull requests or edit the repo; just talk.',
+    '',
+    'You can RECONFIGURE YOURSELF from this chat. When the operator asks you to change',
+    'your behavior, personality, instructions, model, daily budget, or skills (including',
+    'creating a brand-new skill for yourself), apply the change by ending your reply with',
+    'exactly one config block in this format:',
+    '',
+    '::config-begin::',
+    '{"instructions": string?, "name": string?, "model": string?, "dailyBudgetUsd": number?, "skills": [{"name": string, "content": string}]?}',
+    '::config-end::',
+    '',
+    'Config rules:',
+    '- Include ONLY the fields you are actually changing. Omit the whole block when the',
+    '  operator is just chatting and not asking for a change.',
+    '- "instructions" REPLACES your entire system prompt — write the full new text, not a diff.',
+    '- "skills" REPLACES your entire skill set — include every existing skill you want to keep,',
+    '  plus any new one. To add a skill, return the current skills plus the new one.',
+    `- "model" must be exactly one of: ${models}.`,
+    '- Always explain the change to the operator in plain prose BEFORE the block.',
+    '- The block is stripped before the operator sees your reply; never mention it.',
+    '',
+    `Current model: ${agent.model} · daily budget: $${agent.dailyBudgetUsd.toFixed(2)}`,
+    '',
+    '=== YOUR INSTRUCTIONS ===',
+    agent.instructions || '(none configured)',
+    '',
+    '=== YOUR SKILLS ===',
+    skills,
+    ...(convo ? ['', '=== CONVERSATION SO FAR ===', convo] : []),
+    '',
+    '=== NEW MESSAGE FROM OPERATOR ===',
+    message,
+    '',
+    'Reply now (prose for the operator first, then an optional config block):',
+  ].join('\n');
+}
+
+/**
+ * One chat turn, run inline via `docker exec … sh -c`. Inputs arrive as env on
+ * the exec: CHAT_PROMPT, MODEL_ID, the Claude credential, and optional conduit
+ * MCP. Kept inline (not a baked script) so it works on any agent container,
+ * including ones created before chat existed or off an auto-committed image.
+ * Prints the model's plain-text reply to stdout. Does NOT touch the repo.
+ */
+const CHAT_SCRIPT = `set -u
+args="-p --output-format json"
+[ -n "\${MODEL_ID:-}" ] && args="$args --model \${MODEL_ID}"
+if [ -n "\${CONDUIT_MCP_URL:-}" ]; then
+  printf '{ "mcpServers": { "conduit": { "type": "http", "url": "%s", "headers": { "Authorization": "Bearer %s" } } } }' "\${CONDUIT_MCP_URL}" "\${CONDUIT_API_KEY:-}" > /work/.chat.mcp.json
+  args="$args --mcp-config /work/.chat.mcp.json --allowedTools mcp__conduit"
+fi
+printf '%s' "\${CHAT_PROMPT:-}" | claude $args
+rm -f /work/.chat.mcp.json`;
+
+/** A self-reconfiguration the agent requested mid-chat (all fields optional). */
+export interface ChatConfigPatch {
+  instructions?: string;
+  name?: string;
+  model?: string;
+  dailyBudgetUsd?: number;
+  skills?: Array<{ name?: string; content?: string }>;
+}
+
+/** A single chat reply, the cost/tokens it spent (zero on the fallback paths),
+ *  and any self-config the agent asked to apply. */
+export interface ChatTurn {
+  reply: string;
+  costUsd: number;
+  tokensIn: number;
+  tokensOut: number;
+  config?: ChatConfigPatch;
+}
+
+const CONFIG_RE = /::config-begin::\s*([\s\S]*?)\s*::config-end::/;
+
+/** Pull the agent's reply text apart from any trailing `::config-begin::…::config-end::`
+ *  block, returning the operator-visible prose and the parsed config (if valid). */
+function extractConfig(text: string): { reply: string; config?: ChatConfigPatch } {
+  const m = text.match(CONFIG_RE);
+  if (!m) return { reply: text };
+  const reply = text.replace(CONFIG_RE, '').trim() || '(configuration updated.)';
+  // Tolerate the model wrapping the JSON in a ```json fence inside the block.
+  const raw = m[1].trim().replace(/^```(?:json)?/i, '').replace(/```$/, '').trim();
+  try {
+    return { reply, config: JSON.parse(raw) as ChatConfigPatch };
+  } catch {
+    return { reply }; // unparseable — strip it, apply nothing
+  }
+}
+
+/** Parse `claude -p --output-format json` stdout into reply text + usage + config.
+ *  Falls back to treating the whole output as the reply (no usage) if it isn't JSON. */
+function parseChatResult(stdout: string): ChatTurn {
+  const text = stdout.trim();
+  try {
+    const j = JSON.parse(text) as {
+      result?: string;
+      total_cost_usd?: number;
+      usage?: {
+        input_tokens?: number;
+        output_tokens?: number;
+        cache_read_input_tokens?: number;
+        cache_creation_input_tokens?: number;
+      };
+    };
+    const u = j.usage ?? {};
+    const tokensIn =
+      (u.input_tokens ?? 0) +
+      (u.cache_read_input_tokens ?? 0) +
+      (u.cache_creation_input_tokens ?? 0);
+    const { reply, config } = extractConfig((j.result ?? '').trim() || text);
+    return { reply, costUsd: j.total_cost_usd ?? 0, tokensIn, tokensOut: u.output_tokens ?? 0, config };
+  } catch {
+    const { reply, config } = extractConfig(text);
+    return { reply, costUsd: 0, tokensIn: 0, tokensOut: 0, config };
+  }
+}
+
+/**
+ * Apply a chat-requested self-reconfiguration to the agent. Validates each field
+ * (model must be valid for the provider; budget clamped; skills get stable ids
+ * reconciled by name), persists via updateAgent, and records a rollback-able
+ * learning entry when persona content (instructions/skills) changed. Returns the
+ * updated agent + a short summary, or null when nothing actually changed.
+ */
+export function applyChatConfig(
+  agent: DeployedAgent,
+  patch: ChatConfigPatch,
+): { agent: DeployedAgent; summary: string } | null {
+  const update: {
+    instructions?: string;
+    name?: string;
+    model?: string;
+    dailyBudgetUsd?: number;
+    skills?: Skill[];
+  } = {};
+  const changes: string[] = [];
+
+  if (typeof patch.instructions === 'string') {
+    const next = patch.instructions.trim();
+    if (next && next !== agent.instructions.trim()) {
+      update.instructions = next;
+      changes.push('instructions');
+    }
+  }
+  if (typeof patch.name === 'string' && patch.name.trim() && patch.name.trim() !== agent.name) {
+    update.name = patch.name.trim();
+    changes.push('name');
+  }
+  if (typeof patch.model === 'string' && patch.model !== agent.model) {
+    if (providerInfo(agent.provider).models.some((m) => m.id === patch.model)) {
+      update.model = patch.model;
+      changes.push('model');
+    }
+  }
+  if (typeof patch.dailyBudgetUsd === 'number' && Number.isFinite(patch.dailyBudgetUsd)) {
+    const b = Math.max(0, Math.min(50, patch.dailyBudgetUsd));
+    if (b !== agent.dailyBudgetUsd) {
+      update.dailyBudgetUsd = b;
+      changes.push('budget');
+    }
+  }
+  if (Array.isArray(patch.skills)) {
+    const byName = new Map(agent.skills.map((s) => [s.name.trim().toLowerCase(), s]));
+    const next: Skill[] = patch.skills
+      .filter((s): s is { name: string; content?: string } => Boolean(s && typeof s.name === 'string' && s.name.trim()))
+      .map((s) => ({
+        id: byName.get(s.name.trim().toLowerCase())?.id ?? randomUUID(),
+        name: s.name.trim(),
+        content: typeof s.content === 'string' ? s.content : '',
+      }));
+    if (JSON.stringify(next) !== JSON.stringify(agent.skills)) {
+      update.skills = next;
+      const delta = next.length - agent.skills.length;
+      changes.push(delta > 0 ? `skills (+${delta})` : delta < 0 ? `skills (${delta})` : 'skills');
+    }
+  }
+
+  if (changes.length === 0) return null;
+
+  const summary = `chat: updated ${changes.join(', ')}`;
+  // Keep a rollback point whenever persona content (instructions/skills) changed.
+  if (update.instructions !== undefined || update.skills !== undefined) {
+    recordLearning({
+      agentId: agent.id,
+      beforeInstructions: agent.instructions,
+      afterInstructions: update.instructions ?? agent.instructions,
+      beforeSkills: agent.skills,
+      afterSkills: update.skills ?? agent.skills,
+      summary,
+    });
+  }
+  const updated = updateAgent(agent.id, update);
+  return updated ? { agent: updated, summary } : null;
+}
+
+/**
+ * Run one chat turn against the agent inside its persistent container, returning
+ * the model's reply. The agent speaks with its current instructions/skills and
+ * trained environment. Falls back to a clear, friendly message when the provider
+ * isn't Claude Code, credentials are missing, or in dry-run mode — so the chat
+ * stays usable without crashing the request.
+ */
+export async function chatWithAgent(
+  agent: DeployedAgent,
+  history: Array<{ role: 'user' | 'agent'; content: string }>,
+  message: string,
+): Promise<ChatTurn> {
+  const zero = (reply: string): ChatTurn => ({ reply, costUsd: 0, tokensIn: 0, tokensOut: 0 });
+  if (agent.provider !== 'claude-code') {
+    return zero(`(${agent.name} can't chat yet — direct chat is only wired for Claude Code agents.)`);
+  }
+  const creds = claudeCreds();
+  if (config.dryRun || !creds) {
+    return zero(
+      config.dryRun
+        ? `(dry-run mode: chat is simulated. You said: "${message.slice(0, 280)}")`
+        : `(${agent.name} has no Claude Code credentials connected — add a subscription token or API key on the Providers screen to chat.)`,
+    );
+  }
+
+  const name = agentContainerName(agent.id);
+  const env: Record<string, string> = {
+    CHAT_PROMPT: buildChatPrompt(agent, history, message),
+    MODEL_ID: agent.model,
+    PROVIDER: agent.provider,
+    [creds.env]: creds.token,
+  };
+  if (isMemoryEnabled()) {
+    const conduit = getConduitConfig();
+    if (conduit?.url) {
+      env.CONDUIT_MCP_URL = conduit.url;
+      if (conduit.apiKey) env.CONDUIT_API_KEY = conduit.apiKey;
+    }
+  }
+
+  await ensureAgentContainer(agent);
+  const args = ['exec'];
+  for (const [k, v] of Object.entries(env)) args.push('-e', `${k}=${v}`);
+  // Run the turn inline rather than via a baked script: long-lived (and
+  // auto-committed) agent containers may predate any /usr/local/bin/chat-task.sh,
+  // and `claude` + /work are always present in the image either way.
+  args.push(name, 'sh', '-c', CHAT_SCRIPT);
+  const res = await docker(args);
+  touchContainer(name);
+  if (!res.stdout.trim()) {
+    return zero(
+      `(${agent.name} returned no reply${res.stderr.trim() ? `: ${res.stderr.trim().slice(0, 200)}` : '.'})`,
+    );
+  }
+  return parseChatResult(res.stdout);
 }
 
 // ---------------------------------------------------------------------------

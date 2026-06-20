@@ -4,6 +4,8 @@ import type {
   AgentLearning,
   AgentSnapshot,
   AgentTemplate,
+  ChatMessage,
+  ChatUsage,
   ConduitStatus,
   BacklogItem,
   BacklogItemType,
@@ -19,6 +21,7 @@ import type {
   ProviderInfo,
   Run,
   Skill,
+  WorkflowGraph,
   WsEvent,
 } from '@tractus/shared';
 
@@ -114,6 +117,15 @@ export const api = {
       body: JSON.stringify({ numbers }),
     }),
 
+  // workflow graph (the In Progress pipeline editor)
+  workflow: (projectId: string) =>
+    req<{ workflow: WorkflowGraph }>(`/api/projects/${projectId}/workflow`),
+  saveWorkflow: (projectId: string, graph: WorkflowGraph) =>
+    req<{ workflow: WorkflowGraph }>(`/api/projects/${projectId}/workflow`, {
+      method: 'PUT',
+      body: JSON.stringify(graph),
+    }),
+
   // agents
   templates: () => req<{ templates: AgentTemplate[] }>('/api/agent-templates'),
   agents: (projectId: string) =>
@@ -155,6 +167,19 @@ export const api = {
   deleteAgent: (agentId: string) =>
     req<{ ok: true }>(`/api/agents/${agentId}`, { method: 'DELETE' }),
   agentRuns: (agentId: string) => req<{ runs: Run[] }>(`/api/agents/${agentId}/runs`),
+
+  // direct chat with an agent
+  agentChat: (agentId: string) =>
+    req<{ messages: ChatMessage[]; usage: ChatUsage }>(`/api/agents/${agentId}/chat`),
+  agentChatUsage: (agentId: string) =>
+    req<{ usage: ChatUsage }>(`/api/agents/${agentId}/chat/usage`),
+  sendAgentChat: (agentId: string, message: string) =>
+    req<{ messages: ChatMessage[]; usage: ChatUsage; change?: string }>(
+      `/api/agents/${agentId}/chat`,
+      { method: 'POST', body: JSON.stringify({ message }) },
+    ),
+  clearAgentChat: (agentId: string) =>
+    req<{ ok: true }>(`/api/agents/${agentId}/chat`, { method: 'DELETE' }),
   runAgent: (agentId: string, workItemNumber: number) =>
     req<{ run: Run }>(`/api/agents/${agentId}/run`, {
       method: 'POST',
@@ -201,6 +226,8 @@ export const api = {
 
   // shared
   logs: (runId: string) => req<{ logs: LogLine[] }>(`/api/runs/${runId}/logs`),
+  agentLogs: (agentId: string) => req<{ logs: LogLine[] }>(`/api/agents/${agentId}/logs`),
+  systemLogs: () => req<{ logs: LogLine[] }>('/api/system/logs'),
   approvals: (state?: string) =>
     req<{ approvals: Approval[] }>(`/api/approvals${state ? `?state=${state}` : ''}`),
   decideApproval: (id: string, decision: 'approved' | 'rejected', comment?: string) =>

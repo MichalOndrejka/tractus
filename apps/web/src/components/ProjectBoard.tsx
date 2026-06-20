@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   DndContext,
   DragOverlay,
@@ -20,6 +20,7 @@ import {
 import { CSS } from '@dnd-kit/utilities';
 import type { BacklogItem, BacklogItemType, BacklogState } from '@tractus/shared';
 import { Modal } from './Modal.js';
+import { WorkflowCanvas } from './WorkflowCanvas.js';
 import { api, connectWs } from '../api.js';
 
 // --------------------------------------------------------------------------
@@ -181,23 +182,28 @@ function EditItemModal({
 }) {
   const currentCol = columnForState(item.state);
   const agentControlled = !!currentCol.locked;
+  // The tile's content is only editable while it sits in New (BACKLOG). Once it
+  // moves on, the modal becomes read-only (approvals/pull-back/delete stay live).
+  const editable = item.state === 'BACKLOG';
   const [title, setTitle] = useState(item.title);
   const [body, setBody] = useState(item.body);
-  const [columnId, setColumnId] = useState(currentCol.id);
   const [type, setType] = useState<BacklogItemType>(item.type);
   const [comment, setComment] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string>();
 
   const save = async () => {
+    // Editing is only possible in New, so the item stays put — movement between
+    // columns is done by dragging on the board, not from this modal.
     setBusy(true);
     setErr(undefined);
-    const col = BOARD_COLUMNS.find((c) => c.id === columnId) ?? BOARD_COLUMNS[0];
-    // Never push an item into a locked (agent-controlled) column from the UI.
-    const targetCol = agentControlled || col.locked ? currentCol : col;
-    const state = targetCol.states.includes(item.state) ? item.state : targetCol.dropState;
     try {
-      await api.updateIssue(projectId, item.number, { state, type, title: title.trim(), body });
+      await api.updateIssue(projectId, item.number, {
+        state: item.state,
+        type,
+        title: title.trim(),
+        body,
+      });
       onSaved();
     } catch (e) {
       setErr(String(e instanceof Error ? e.message : e));
@@ -218,12 +224,13 @@ function EditItemModal({
     }
   };
 
-  // Escape hatch: pull a stranded item out of the locked column back to Ready.
-  const pullBackToReady = async () => {
+  // Escape hatch: pull a stranded item out of the locked column back to New.
+  // (Ready would just get auto-dispatched straight back into the pipeline.)
+  const pullBackToNew = async () => {
     setBusy(true);
     setErr(undefined);
     try {
-      await api.updateIssue(projectId, item.number, { state: 'READY' });
+      await api.updateIssue(projectId, item.number, { state: 'BACKLOG' });
       onSaved();
     } catch (e) {
       setErr(String(e instanceof Error ? e.message : e));
@@ -247,7 +254,7 @@ function EditItemModal({
   };
 
   return (
-    <Modal title={`#${item.number}`} onClose={onClose}>
+    <Modal title={`#${item.number}`} onClose={onClose} size="large">
       {item.activeAgent && (
         <div className="banner" style={{ marginBottom: 12 }}>
           <span className="pulse" /> {item.activeAgent.agentName} ({item.activeAgent.role}) is
@@ -285,17 +292,27 @@ function EditItemModal({
           </div>
         </div>
       )}
+      {!editable && (
+        <div className="muted small" style={{ marginBottom: 12 }}>
+          Read-only — work items can only be edited while in <b>New</b>.
+        </div>
+      )}
       <div className="field">
         <label>Title</label>
-        <input value={title} onChange={(e) => setTitle(e.target.value)} />
+        <input value={title} readOnly={!editable} onChange={(e) => setTitle(e.target.value)} />
       </div>
       <div className="field">
         <label>Description</label>
-        <textarea rows={5} value={body} onChange={(e) => setBody(e.target.value)} />
+        <textarea
+          rows={5}
+          value={body}
+          readOnly={!editable}
+          onChange={(e) => setBody(e.target.value)}
+        />
       </div>
       <div className="row" style={{ gap: 12 }}>
         <div className="field grow">
-          <label>Column</label>
+          <label>Status</label>
           {agentControlled ? (
             <div className="muted small" style={{ padding: '8px 0' }}>
               <b>{currentCol.label}</b> — driven by the agents, not moved by hand.{' '}
@@ -304,31 +321,29 @@ function EditItemModal({
                   className="btn sm"
                   style={{ marginTop: 8 }}
                   disabled={busy}
-                  onClick={pullBackToReady}
+                  onClick={pullBackToNew}
                 >
-                  ↩ Pull back to Ready
+                  ↩ Pull back to New
                 </button>
               )}
             </div>
           ) : (
-            <select value={columnId} onChange={(e) => setColumnId(e.target.value)}>
-              {BOARD_COLUMNS.filter((c) => !c.locked).map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.label}
-                </option>
-              ))}
-            </select>
+            <div className="readonly-field">{currentCol.label}</div>
           )}
         </div>
         <div className="field grow">
           <label>Type</label>
-          <select value={type} onChange={(e) => setType(e.target.value as BacklogItemType)}>
-            {TYPES.map((t) => (
-              <option key={t} value={t}>
-                {t}
-              </option>
-            ))}
-          </select>
+          {editable ? (
+            <select value={type} onChange={(e) => setType(e.target.value as BacklogItemType)}>
+              {TYPES.map((t) => (
+                <option key={t} value={t}>
+                  {t}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <div className="readonly-field">{item.type}</div>
+          )}
         </div>
       </div>
       {err && <div className="banner err">{err}</div>}
@@ -340,9 +355,11 @@ function EditItemModal({
           <a className="btn sm" href={item.url} target="_blank" rel="noreferrer">
             GitHub ↗
           </a>
-          <button className="btn primary" disabled={busy || !title.trim()} onClick={save}>
-            {busy ? 'saving…' : 'Save'}
-          </button>
+          {editable && (
+            <button className="btn primary" disabled={busy || !title.trim()} onClick={save}>
+              {busy ? 'saving…' : 'Save'}
+            </button>
+          )}
         </div>
       </div>
     </Modal>
@@ -409,25 +426,49 @@ function Column({
   numbers,
   byNumber,
   onOpen,
+  onExpand,
 }: {
   column: BoardColumn;
   numbers: number[];
   byNumber: ByNumber;
   onOpen: (item: BacklogItem) => void;
+  onExpand?: (rect: DOMRect) => void;
 }) {
+  const rootRef = useRef<HTMLDivElement | null>(null);
   const { setNodeRef, isOver } = useDroppable({ id: column.id, disabled: column.locked });
   return (
-    <div className={`kcol ${isOver && !column.locked ? 'over' : ''} ${column.locked ? 'locked' : ''}`}>
-      <h4>
-        <span>
-          {column.label} · {numbers.length}
-        </span>
-        {column.locked && (
-          <span className="kcol-tag" title="Agents pick up Ready items and drive this stage">
-            agents only
+    <div
+      ref={(el) => {
+        setNodeRef(el);
+        rootRef.current = el;
+      }}
+      className={`kcol ${isOver && !column.locked ? 'over' : ''} ${column.locked ? 'locked' : ''} ${
+        onExpand ? 'expandable' : ''
+      }`}
+    >
+      {onExpand ? (
+        <button
+          className="kcol-head"
+          title="Open the agent pipeline editor"
+          onClick={() => rootRef.current && onExpand(rootRef.current.getBoundingClientRect())}
+        >
+          <span>
+            {column.label} · {numbers.length}
           </span>
-        )}
-      </h4>
+          <span className="kcol-tag pipeline">⤢ pipeline</span>
+        </button>
+      ) : (
+        <h4>
+          <span>
+            {column.label} · {numbers.length}
+          </span>
+          {column.locked && (
+            <span className="kcol-tag" title="Agents pick up Ready items and drive this stage">
+              agents only
+            </span>
+          )}
+        </h4>
+      )}
       <SortableContext items={numbers.map(String)} strategy={verticalListSortingStrategy}>
         <div ref={setNodeRef} className="kcol-body">
           {numbers.map((n) => (
@@ -449,6 +490,77 @@ function Column({
 }
 
 // --------------------------------------------------------------------------
+// Pipeline editor overlay — grows out of the In Progress column, then fills
+// the screen with the n8n-style WorkflowCanvas. Closing reverses the grow.
+// --------------------------------------------------------------------------
+
+type Box = { left: number; top: number; width: number; height: number };
+
+function WorkflowOverlay({
+  projectId,
+  origin,
+  onClose,
+}: {
+  projectId: string;
+  origin: DOMRect;
+  onClose: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+
+  // Match the large modal size (95vw × 92vh, centered) so the popups feel uniform.
+  const target = useMemo<Box>(() => {
+    const w = window.innerWidth * 0.95;
+    const h = window.innerHeight * 0.92;
+    return {
+      left: (window.innerWidth - w) / 2,
+      top: (window.innerHeight - h) / 2,
+      width: w,
+      height: h,
+    };
+  }, []);
+
+  // Start at the column's rect, then animate to the target on the next frame.
+  useEffect(() => {
+    const id = requestAnimationFrame(() => setOpen(true));
+    return () => cancelAnimationFrame(id);
+  }, []);
+
+  const close = () => {
+    setOpen(false);
+    window.setTimeout(onClose, 300); // matches the CSS transition
+  };
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && close();
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const box: Box = open
+    ? target
+    : { left: origin.left, top: origin.top, width: origin.width, height: origin.height };
+
+  return (
+    <div className={`wf-scrim ${open ? 'show' : ''}`} onClick={close}>
+      <div
+        className={`wf-panel ${open ? 'open' : ''}`}
+        style={box}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <header className="wf-panel-head">
+          <h3>In Progress · Agent Pipeline</h3>
+          <button className="wf-close" onClick={close} title="Close (Esc)">
+            ×
+          </button>
+        </header>
+        <div className="wf-panel-body">{open && <WorkflowCanvas projectId={projectId} />}</div>
+      </div>
+    </div>
+  );
+}
+
+// --------------------------------------------------------------------------
 // Board
 // --------------------------------------------------------------------------
 
@@ -459,6 +571,7 @@ export function ProjectBoard({ projectId }: { projectId: string }) {
   const [err, setErr] = useState<string>();
   const [creating, setCreating] = useState(false);
   const [editing, setEditing] = useState<BacklogItem>();
+  const [flowOrigin, setFlowOrigin] = useState<DOMRect | null>(null);
   const [activeId, setActiveId] = useState<number | null>(null);
   const startColRef = useRef<string | undefined>(undefined);
 
@@ -606,11 +719,20 @@ export function ProjectBoard({ projectId }: { projectId: string }) {
               numbers={columns[col.id] ?? []}
               byNumber={byNumber}
               onOpen={setEditing}
+              onExpand={col.id === 'in_progress' ? setFlowOrigin : undefined}
             />
           ))}
         </div>
         <DragOverlay>{activeItem ? <CardInner item={activeItem} dragging /> : null}</DragOverlay>
       </DndContext>
+
+      {flowOrigin && (
+        <WorkflowOverlay
+          projectId={projectId}
+          origin={flowOrigin}
+          onClose={() => setFlowOrigin(null)}
+        />
+      )}
 
       {creating && (
         <NewItemModal

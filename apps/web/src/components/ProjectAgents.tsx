@@ -1,6 +1,11 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { providerInfo, type AgentTemplate, type DeployedAgent } from '@tractus/shared';
+import {
+  providerInfo,
+  type AgentSnapshot,
+  type AgentTemplate,
+  type DeployedAgent,
+} from '@tractus/shared';
 import { Modal } from './Modal.js';
 import { AgentForm, type AgentDraft } from './AgentForm.js';
 import { api } from '../api.js';
@@ -23,6 +28,7 @@ function DeployModal({
   onDeployed: (a: DeployedAgent) => void;
 }) {
   const [templates, setTemplates] = useState<AgentTemplate[]>([]);
+  const [snapshots, setSnapshots] = useState<AgentSnapshot[]>([]);
   const [selected, setSelected] = useState<AgentTemplate>();
   const [draft, setDraft] = useState<AgentDraft>();
   const [busy, setBusy] = useState(false);
@@ -30,6 +36,7 @@ function DeployModal({
 
   useEffect(() => {
     api.templates().then((r) => setTemplates(r.templates)).catch(() => undefined);
+    api.snapshots().then((r) => setSnapshots(r.snapshots)).catch(() => undefined);
   }, []);
 
   const pick = (t: AgentTemplate) => {
@@ -57,10 +64,24 @@ function DeployModal({
     }
   };
 
-  // step 2 — customize
+  // Add an already-trained agent: spawn one copy from its snapshot image.
+  const addTrained = async (snap: AgentSnapshot) => {
+    setBusy(true);
+    setErr(undefined);
+    try {
+      const { agents } = await api.spawnFromSnapshot(snap.id, projectId, 1);
+      if (agents[0]) onDeployed(agents[0]);
+      else throw new Error('spawn returned no agent');
+    } catch (e) {
+      setErr(String(e instanceof Error ? e.message : e));
+      setBusy(false);
+    }
+  };
+
+  // step 2 — customize (templates only)
   if (selected && draft) {
     return (
-      <Modal title={`Deploy ${selected.name}`} onClose={onClose}>
+      <Modal title={`Add ${selected.name}`} onClose={onClose} size="large">
         <AgentForm value={draft} onChange={setDraft} />
         {err && <div className="banner err">{err}</div>}
         <div className="row between">
@@ -68,31 +89,65 @@ function DeployModal({
             ‹ back
           </button>
           <button className="btn primary" disabled={!draft.name.trim() || busy} onClick={deploy}>
-            {busy ? 'deploying…' : 'Deploy agent'}
+            {busy ? 'adding…' : 'Add agent'}
           </button>
         </div>
       </Modal>
     );
   }
 
-  // step 1 — pick template
+  // step 1 — pick a template or a trained agent
   return (
-    <Modal title="Choose an agent" onClose={onClose}>
-      {templates.map((t) => (
-        <div className="card click" key={t.id} onClick={() => pick(t)}>
-          <div className="row between">
-            <span style={{ fontWeight: 700 }}>{t.name}</span>
-            <span className="tag violet">{providerModelLabel(t.provider, t.model)}</span>
+    <Modal title="Add an agent" onClose={onClose} size="large">
+      {err && <div className="banner err">{err}</div>}
+
+      <div className="section-title">Templates</div>
+      <div className="picker-grid">
+        {templates.map((t) => (
+          <div className="card click" key={t.id} onClick={() => !busy && pick(t)}>
+            <div className="row between">
+              <span style={{ fontWeight: 700 }}>{t.name}</span>
+              <span className="tag violet">{providerModelLabel(t.provider, t.model)}</span>
+            </div>
+            <div className="muted small" style={{ margin: '8px 0', lineHeight: 1.5 }}>
+              {t.blurb}
+            </div>
+            <div className="row between">
+              <span className="muted small">default ${t.defaultDailyBudgetUsd}/day</span>
+              <span className="muted">›</span>
+            </div>
           </div>
-          <div className="muted small" style={{ margin: '8px 0', lineHeight: 1.5 }}>
-            {t.blurb}
-          </div>
-          <div className="row between">
-            <span className="muted small">default ${t.defaultDailyBudgetUsd}/day</span>
-            <span className="muted">›</span>
-          </div>
+        ))}
+      </div>
+
+      <div className="section-title">Trained agents</div>
+      {snapshots.length === 0 ? (
+        <div className="muted small" style={{ lineHeight: 1.6 }}>
+          No trained agents yet. Snapshot a deployed agent to capture its trained
+          image, then add copies here.
         </div>
-      ))}
+      ) : (
+        <div className="picker-grid">
+          {snapshots.map((s) => (
+            <div className="card click" key={s.id} onClick={() => !busy && addTrained(s)}>
+              <div className="row between">
+                <div className="row" style={{ gap: 10 }}>
+                  <span className="tag state">{s.role}</span>
+                  <span style={{ fontWeight: 700 }}>{s.name}</span>
+                </div>
+                <span className="tag violet">trained</span>
+              </div>
+              <div className="muted small" style={{ margin: '8px 0', lineHeight: 1.5 }}>
+                {s.notes || s.imageTag}
+              </div>
+              <div className="row between">
+                <span className="muted small">{s.skills.length} skills</span>
+                <span className="muted">{busy ? 'adding…' : '+ add copy'}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </Modal>
   );
 }
@@ -118,12 +173,12 @@ export function ProjectAgents({ projectId }: { projectId: string }) {
       <div className="row between" style={{ marginBottom: 12 }}>
         <span className="muted small">{agents.length} deployed</span>
         <button className="btn sm primary" onClick={() => setDeploying(true)}>
-          + Deploy agent
+          + Add agent
         </button>
       </div>
 
       {agents.length === 0 ? (
-        <div className="empty">No agents deployed. Deploy one to staff this project.</div>
+        <div className="empty">No agents deployed. Add one to staff this project.</div>
       ) : (
         agents.map((a) => (
           <div
