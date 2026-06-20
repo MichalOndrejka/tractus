@@ -32,19 +32,19 @@ export function ProjectDetail() {
         <nav className="subnav">
           <button
             className={tab === 'board' ? 'active' : ''}
-            onClick={() => setParams({ tab: 'board' })}
+            onClick={() => setParams({ tab: 'board' }, { replace: true })}
           >
             <span className="glyph">▤</span> <span>Board</span>
           </button>
           <button
             className={tab === 'agents' ? 'active' : ''}
-            onClick={() => setParams({ tab: 'agents' })}
+            onClick={() => setParams({ tab: 'agents' }, { replace: true })}
           >
             <span className="glyph">⌬</span> <span>Agents</span>
           </button>
           <button
             className={tab === 'logs' ? 'active' : ''}
-            onClick={() => setParams({ tab: 'logs' })}
+            onClick={() => setParams({ tab: 'logs' }, { replace: true })}
           >
             <span className="glyph">⌗</span> <span>Logs</span>
           </button>
